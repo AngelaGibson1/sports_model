@@ -1,653 +1,854 @@
-import sqlite3
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
-from pathlib import Path
 from loguru import logger
-import json
+import warnings
 
 from config.settings import Settings
+from data.database.nba import NBADatabase
+from utils.data_helpers import (
+    calculate_rolling_averages,
+    calculate_rolling_statistics,
+    calculate_team_form,
+    calculate_head_to_head_stats,
+    create_feature_interactions,
+    create_lag_features,
+    handle_missing_values
+)
 
-class NBADatabase:
-    """Manages NBA data storage and retrieval."""
+warnings.filterwarnings('ignore')
+
+class NBAFeatureEngineer:
+    """
+    Comprehensive NBA feature engineering for game prediction models.
+    Creates advanced features from raw NBA data for machine learning models.
+    """
     
-    def __init__(self, db_path: Optional[Path] = None):
-        """Initialize NBA database connection."""
-        self.db_path = db_path or Settings.NBA_DB_PATH
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize database tables
-        self._create_tables()
-        logger.info(f"✅ NBA Database initialized: {self.db_path}")
-    
-    def _create_tables(self):
-        """Create all necessary tables for NBA data."""
-        with sqlite3.connect(self.db_path) as conn:
-            # Games table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS games (
-                    game_id INTEGER PRIMARY KEY,
-                    date TEXT NOT NULL,
-                    time TEXT,
-                    season INTEGER,
-                    home_team_id INTEGER,
-                    away_team_id INTEGER,
-                    home_team_name TEXT,
-                    away_team_name TEXT,
-                    home_score INTEGER,
-                    away_score INTEGER,
-                    status TEXT,
-                    venue TEXT,
-                    city TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Teams table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS teams (
-                    team_id INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    code TEXT,
-                    city TEXT,
-                    conference TEXT,
-                    division TEXT,
-                    logo TEXT,
-                    founded INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Players table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS players (
-                    player_id INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    firstname TEXT,
-                    lastname TEXT,
-                    age INTEGER,
-                    height TEXT,
-                    weight TEXT,
-                    position TEXT,
-                    jersey_number INTEGER,
-                    country TEXT,
-                    team_id INTEGER,
-                    active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (team_id) REFERENCES teams (team_id)
-                )
-            ''')
-            
-            # Team statistics table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS team_statistics (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    team_id INTEGER,
-                    season INTEGER,
-                    games_played INTEGER,
-                    wins INTEGER,
-                    losses INTEGER,
-                    win_percentage REAL,
-                    points_per_game REAL,
-                    points_allowed_per_game REAL,
-                    field_goal_percentage REAL,
-                    three_point_percentage REAL,
-                    free_throw_percentage REAL,
-                    rebounds_per_game REAL,
-                    assists_per_game REAL,
-                    steals_per_game REAL,
-                    blocks_per_game REAL,
-                    turnovers_per_game REAL,
-                    offensive_rating REAL,
-                    defensive_rating REAL,
-                    pace REAL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (team_id) REFERENCES teams (team_id)
-                )
-            ''')
-            
-            # Player statistics table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS player_statistics (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    player_id INTEGER,
-                    team_id INTEGER,
-                    season INTEGER,
-                    games_played INTEGER,
-                    minutes_per_game REAL,
-                    points_per_game REAL,
-                    rebounds_per_game REAL,
-                    assists_per_game REAL,
-                    steals_per_game REAL,
-                    blocks_per_game REAL,
-                    field_goal_percentage REAL,
-                    three_point_percentage REAL,
-                    free_throw_percentage REAL,
-                    turnovers_per_game REAL,
-                    player_efficiency_rating REAL,
-                    true_shooting_percentage REAL,
-                    usage_rate REAL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (player_id) REFERENCES players (player_id),
-                    FOREIGN KEY (team_id) REFERENCES teams (team_id)
-                )
-            ''')
-            
-            # Game odds table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS game_odds (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    game_id INTEGER,
-                    bookmaker TEXT,
-                    market TEXT,
-                    home_odds REAL,
-                    away_odds REAL,
-                    spread REAL,
-                    total REAL,
-                    last_update TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (game_id) REFERENCES games (game_id)
-                )
-            ''')
-            
-            # Player props table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS player_props (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    game_id INTEGER,
-                    player_id INTEGER,
-                    prop_type TEXT,
-                    line REAL,
-                    over_odds REAL,
-                    under_odds REAL,
-                    bookmaker TEXT,
-                    last_update TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (game_id) REFERENCES games (game_id),
-                    FOREIGN KEY (player_id) REFERENCES players (player_id)
-                )
-            ''')
-            
-            # Create indexes for better performance
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_games_date ON games (date)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_games_season ON games (season)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_games_teams ON games (home_team_id, away_team_id)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_team_stats_season ON team_statistics (team_id, season)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_player_stats_season ON player_statistics (player_id, season)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_odds_game ON game_odds (game_id)')
-            
-            conn.commit()
-    
-    def save_games(self, games_df: pd.DataFrame) -> int:
+    def __init__(self, db: Optional[NBADatabase] = None):
         """
-        Save games data to database.
+        Initialize NBA feature engineer.
         
         Args:
-            games_df: DataFrame with game data
+            db: Optional NBA database instance
+        """
+        self.db = db or NBADatabase()
+        self.nba_config = Settings.SPORT_CONFIGS['nba']
+        self.rolling_windows = Settings.ROLLING_WINDOWS['nba']
+        
+        # NBA-specific feature configuration
+        self.key_stats = [
+            'points_per_game', 'points_allowed_per_game', 'field_goal_percentage',
+            'three_point_percentage', 'free_throw_percentage', 'rebounds_per_game',
+            'assists_per_game', 'steals_per_game', 'blocks_per_game', 
+            'turnovers_per_game', 'offensive_rating', 'defensive_rating', 'pace'
+        ]
+        
+        self.pace_adjustments = True
+        self.logger = logger
+        
+        logger.info("🏀 NBA Feature Engineer initialized")
+    
+    def engineer_game_features(self, 
+                              seasons: Optional[List[int]] = None,
+                              include_advanced: bool = True,
+                              include_situational: bool = True) -> pd.DataFrame:
+        """
+        Create comprehensive features for NBA game prediction.
+        
+        Args:
+            seasons: Seasons to include in feature engineering
+            include_advanced: Whether to include advanced metrics
+            include_situational: Whether to include situational features
             
         Returns:
-            Number of games saved
+            DataFrame with engineered features
         """
-        if games_df.empty:
-            return 0
+        logger.info("🔧 Starting NBA feature engineering...")
         
-        with sqlite3.connect(self.db_path) as conn:
-            # Prepare data
-            games_data = games_df.copy()
+        # Get base historical data
+        historical_df = self.db.get_historical_data(seasons)
+        
+        if historical_df.empty:
+            logger.warning("No historical data available for feature engineering")
+            return pd.DataFrame()
+        
+        # Sort by date for proper time series processing
+        historical_df = historical_df.sort_values(['date', 'game_id'])
+        
+        # Create base features
+        features_df = self._create_base_features(historical_df)
+        
+        # Add rolling performance features
+        features_df = self._add_rolling_performance_features(features_df)
+        
+        # Add team form and momentum features
+        features_df = self._add_team_form_features(features_df)
+        
+        # Add head-to-head features
+        features_df = self._add_head_to_head_features(features_df)
+        
+        if include_situational:
+            # Add situational features
+            features_df = self._add_situational_features(features_df)
+        
+        if include_advanced:
+            # Add advanced metrics
+            features_df = self._add_advanced_metrics(features_df)
+        
+        # Add feature interactions
+        features_df = self._add_feature_interactions(features_df)
+        
+        # Handle missing values
+        features_df = handle_missing_values(features_df, strategy='smart')
+        
+        # Final cleanup
+        features_df = self._cleanup_features(features_df)
+        
+        logger.info(f"✅ Feature engineering complete: {features_df.shape[0]} games, {features_df.shape[1]} features")
+        
+        return features_df
+    
+    def _create_base_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create base features from raw game data."""
+        logger.info("📊 Creating base features...")
+        
+        features_df = df.copy()
+        
+        # Basic game features
+        features_df['total_points'] = features_df['home_score'] + features_df['away_score']
+        features_df['point_differential'] = features_df['home_score'] - features_df['away_score']
+        features_df['home_win'] = (features_df['home_score'] > features_df['away_score']).astype(int)
+        
+        # Date features
+        features_df['date'] = pd.to_datetime(features_df['date'])
+        features_df['month'] = features_df['date'].dt.month
+        features_df['day_of_week'] = features_df['date'].dt.dayofweek
+        features_df['is_weekend'] = features_df['day_of_week'].isin([5, 6]).astype(int)
+        
+        # Season features
+        features_df['season_progress'] = self._calculate_season_progress(features_df)
+        
+        # Team strength differentials (if stats available)
+        stat_columns = [col for col in self.key_stats if f'home_{col}' in features_df.columns]
+        
+        for stat in stat_columns:
+            home_col = f'home_{stat}'
+            away_col = f'away_{stat}'
             
-            # Map DataFrame columns to database columns
-            column_mapping = {
-                'game_id': 'game_id',
-                'date': 'date',
-                'time': 'time',
-                'season': 'season',
-                'home_team_id': 'home_team_id',
-                'away_team_id': 'away_team_id',
-                'home_team_name': 'home_team_name',
-                'away_team_name': 'away_team_name',
-                'home_score': 'home_score',
-                'away_score': 'away_score',
-                'status': 'status',
-                'venue': 'venue',
-                'city': 'city'
+            if home_col in features_df.columns and away_col in features_df.columns:
+                features_df[f'{stat}_diff'] = features_df[home_col] - features_df[away_col]
+                features_df[f'{stat}_ratio'] = features_df[home_col] / (features_df[away_col] + 0.001)
+        
+        return features_df
+    
+    def _add_rolling_performance_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add rolling performance features for both teams."""
+        logger.info("📈 Adding rolling performance features...")
+        
+        features_df = df.copy()
+        
+        # Create team performance tracking
+        home_performance = self._create_team_performance_tracking(features_df, 'home')
+        away_performance = self._create_team_performance_tracking(features_df, 'away')
+        
+        # Add rolling statistics for multiple windows
+        for window_name, window_size in self.rolling_windows.items():
+            # Home team rolling stats
+            home_rolling = self._calculate_team_rolling_stats(
+                home_performance, window_size, f'home_{window_name}'
+            )
+            
+            # Away team rolling stats  
+            away_rolling = self._calculate_team_rolling_stats(
+                away_performance, window_size, f'away_{window_name}'
+            )
+            
+            # Merge rolling stats back to features
+            features_df = self._merge_rolling_stats(features_df, home_rolling, away_rolling, window_name)
+        
+        return features_df
+    
+    def _add_team_form_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add team form and momentum features."""
+        logger.info("🔥 Adding team form features...")
+        
+        features_df = df.copy()
+        
+        # Create form tracking for home and away teams
+        for team_type in ['home', 'away']:
+            team_id_col = f'{team_type}_team_id'
+            
+            # Recent form (last 5, 10, 20 games)
+            for window in [5, 10, 20]:
+                form_col = f'{team_type}_form_{window}'
+                features_df[form_col] = self._calculate_team_form_rolling(
+                    features_df, team_id_col, window
+                )
+            
+            # Win/loss streaks
+            features_df[f'{team_type}_win_streak'] = self._calculate_win_streaks(
+                features_df, team_id_col, streak_type='win'
+            )
+            features_df[f'{team_type}_loss_streak'] = self._calculate_win_streaks(
+                features_df, team_id_col, streak_type='loss'
+            )
+            
+            # Home/away specific form
+            features_df[f'{team_type}_home_form_10'] = self._calculate_venue_form(
+                features_df, team_id_col, venue='home', window=10
+            )
+            features_df[f'{team_type}_away_form_10'] = self._calculate_venue_form(
+                features_df, team_id_col, venue='away', window=10
+            )
+        
+        # Form differentials
+        for window in [5, 10, 20]:
+            features_df[f'form_diff_{window}'] = (
+                features_df[f'home_form_{window}'] - features_df[f'away_form_{window}']
+            )
+        
+        return features_df
+    
+    def _add_head_to_head_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add head-to-head historical features."""
+        logger.info("⚔️ Adding head-to-head features...")
+        
+        features_df = df.copy()
+        
+        # Calculate H2H statistics for each game
+        h2h_features = []
+        
+        for idx, row in features_df.iterrows():
+            home_team = row['home_team_id']
+            away_team = row['away_team_id']
+            game_date = row['date']
+            
+            # Get historical H2H data before this game
+            h2h_stats = self._get_historical_h2h(
+                home_team, away_team, game_date, features_df
+            )
+            
+            h2h_features.append(h2h_stats)
+        
+        # Convert to DataFrame and merge
+        h2h_df = pd.DataFrame(h2h_features)
+        features_df = pd.concat([features_df.reset_index(drop=True), h2h_df], axis=1)
+        
+        return features_df
+    
+    def _add_situational_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add situational features (rest, travel, etc.)."""
+        logger.info("🎯 Adding situational features...")
+        
+        features_df = df.copy()
+        
+        # Calculate rest days for both teams
+        features_df['home_rest_days'] = self._calculate_rest_days(
+            features_df, 'home_team_id', 'home'
+        )
+        features_df['away_rest_days'] = self._calculate_rest_days(
+            features_df, 'away_team_id', 'away'
+        )
+        
+        # Rest advantage
+        features_df['rest_advantage'] = (
+            features_df['home_rest_days'] - features_df['away_rest_days']
+        )
+        
+        # Back-to-back games
+        features_df['home_back_to_back'] = (features_df['home_rest_days'] == 0).astype(int)
+        features_df['away_back_to_back'] = (features_df['away_rest_days'] == 0).astype(int)
+        
+        # Both teams on back-to-back
+        features_df['both_back_to_back'] = (
+            features_df['home_back_to_back'] & features_df['away_back_to_back']
+        ).astype(int)
+        
+        # Home court advantage features
+        features_df['home_court_advantage'] = self._calculate_home_court_advantage(features_df)
+        
+        # Schedule difficulty (games in last X days)
+        for days in [7, 14]:
+            features_df[f'home_games_last_{days}d'] = self._count_recent_games(
+                features_df, 'home_team_id', days
+            )
+            features_df[f'away_games_last_{days}d'] = self._count_recent_games(
+                features_df, 'away_team_id', days
+            )
+        
+        return features_df
+    
+    def _add_advanced_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add advanced NBA metrics."""
+        logger.info("🧮 Adding advanced metrics...")
+        
+        features_df = df.copy()
+        
+        # Pace adjustments for relevant stats
+        if self.pace_adjustments:
+            features_df = self._add_pace_adjusted_stats(features_df)
+        
+        # Pythagorean expectation
+        features_df = self._add_pythagorean_expectation(features_df)
+        
+        # Strength of schedule
+        features_df = self._add_strength_of_schedule(features_df)
+        
+        # Net rating differentials
+        if 'home_offensive_rating' in features_df.columns:
+            features_df['home_net_rating'] = (
+                features_df['home_offensive_rating'] - features_df['home_defensive_rating']
+            )
+            features_df['away_net_rating'] = (
+                features_df['away_offensive_rating'] - features_df['away_defensive_rating']
+            )
+            features_df['net_rating_diff'] = (
+                features_df['home_net_rating'] - features_df['away_net_rating']
+            )
+        
+        # Efficiency metrics
+        features_df = self._add_efficiency_metrics(features_df)
+        
+        return features_df
+    
+    def _add_feature_interactions(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add feature interactions."""
+        logger.info("🔗 Adding feature interactions...")
+        
+        features_df = df.copy()
+        
+        # Define important feature pairs for interactions
+        interaction_pairs = [
+            ('home_form_10', 'away_form_10'),
+            ('home_offensive_rating', 'away_defensive_rating'),
+            ('home_defensive_rating', 'away_offensive_rating'),
+            ('home_pace', 'away_pace'),
+            ('rest_advantage', 'home_court_advantage')
+        ]
+        
+        # Filter pairs that exist in the DataFrame
+        valid_pairs = [
+            (feat1, feat2) for feat1, feat2 in interaction_pairs
+            if feat1 in features_df.columns and feat2 in features_df.columns
+        ]
+        
+        if valid_pairs:
+            features_df = create_feature_interactions(
+                features_df, valid_pairs, ['multiply', 'subtract']
+            )
+        
+        return features_df
+    
+    def _create_team_performance_tracking(self, df: pd.DataFrame, team_type: str) -> pd.DataFrame:
+        """Create team performance tracking DataFrame."""
+        team_id_col = f'{team_type}_team_id'
+        score_col = f'{team_type}_score'
+        opp_score_col = 'away_score' if team_type == 'home' else 'home_score'
+        
+        performance_data = []
+        
+        for _, row in df.iterrows():
+            perf_row = {
+                'team_id': row[team_id_col],
+                'date': row['date'],
+                'game_id': row['game_id'],
+                'points_scored': row[score_col],
+                'points_allowed': row[opp_score_col],
+                'win': 1 if row[score_col] > row[opp_score_col] else 0,
+                'venue': team_type
             }
             
-            # Select and rename columns
-            save_columns = [col for col in column_mapping.keys() if col in games_data.columns]
-            games_data = games_data[save_columns].rename(columns=column_mapping)
+            # Add team stats if available
+            for stat in self.key_stats:
+                stat_col = f'{team_type}_{stat}'
+                if stat_col in df.columns:
+                    perf_row[stat] = row[stat_col]
             
-            # Handle missing values
-            games_data = games_data.fillna({
-                'time': '',
-                'home_score': 0,
-                'away_score': 0,
-                'status': 'Scheduled',
-                'venue': '',
-                'city': ''
-            })
-            
-            # Use INSERT OR REPLACE to handle duplicates
-            games_data.to_sql('games', conn, if_exists='append', index=False, method='multi')
-            
-            logger.info(f"✅ Saved {len(games_data)} NBA games to database")
-            return len(games_data)
+            performance_data.append(perf_row)
+        
+        return pd.DataFrame(performance_data).sort_values(['team_id', 'date'])
     
-    def save_teams(self, teams_df: pd.DataFrame) -> int:
-        """Save teams data to database."""
-        if teams_df.empty:
-            return 0
+    def _calculate_team_rolling_stats(self, team_df: pd.DataFrame, 
+                                    window: int, prefix: str) -> pd.DataFrame:
+        """Calculate rolling statistics for a team."""
+        rolling_df = team_df.copy()
         
-        with sqlite3.connect(self.db_path) as conn:
-            teams_data = teams_df.copy()
-            
-            # Map columns
-            column_mapping = {
-                'team_id': 'team_id',
-                'name': 'name',
-                'code': 'code',
-                'city': 'city',
-                'logo': 'logo',
-                'founded': 'founded'
-            }
-            
-            save_columns = [col for col in column_mapping.keys() if col in teams_data.columns]
-            teams_data = teams_data[save_columns].rename(columns=column_mapping)
-            
-            # Handle NBA-specific team data
-            if 'conference' not in teams_data.columns:
-                teams_data['conference'] = self._infer_conference(teams_data)
-            if 'division' not in teams_data.columns:
-                teams_data['division'] = self._infer_division(teams_data)
-            
-            teams_data.to_sql('teams', conn, if_exists='replace', index=False)
-            
-            logger.info(f"✅ Saved {len(teams_data)} NBA teams to database")
-            return len(teams_data)
+        # Rolling averages for key metrics
+        rolling_cols = ['points_scored', 'points_allowed', 'win']
+        rolling_cols.extend([col for col in self.key_stats if col in rolling_df.columns])
+        
+        rolling_df = calculate_rolling_averages(
+            rolling_df, rolling_cols, [window], group_by='team_id'
+        )
+        
+        # Rename columns with prefix
+        rename_dict = {}
+        for col in rolling_cols:
+            old_name = f'{col}_roll_{window}'
+            new_name = f'{prefix}_{col}_avg'
+            if old_name in rolling_df.columns:
+                rename_dict[old_name] = new_name
+        
+        rolling_df = rolling_df.rename(columns=rename_dict)
+        
+        return rolling_df[['team_id', 'game_id'] + list(rename_dict.values())]
     
-    def save_team_statistics(self, stats_df: pd.DataFrame) -> int:
-        """Save team statistics to database."""
-        if stats_df.empty:
-            return 0
+    def _merge_rolling_stats(self, features_df: pd.DataFrame, 
+                           home_rolling: pd.DataFrame, 
+                           away_rolling: pd.DataFrame,
+                           window_name: str) -> pd.DataFrame:
+        """Merge rolling statistics back to features DataFrame."""
+        # Merge home team rolling stats
+        features_df = features_df.merge(
+            home_rolling,
+            left_on=['home_team_id', 'game_id'],
+            right_on=['team_id', 'game_id'],
+            how='left',
+            suffixes=('', '_home_roll')
+        ).drop('team_id', axis=1, errors='ignore')
         
-        with sqlite3.connect(self.db_path) as conn:
-            stats_data = stats_df.copy()
-            
-            # NBA-specific column mapping
-            nba_columns = {
-                'team_id': 'team_id',
-                'season': 'season',
-                'games': 'games_played',
-                'wins': 'wins',
-                'losses': 'losses',
-                'winPercentage': 'win_percentage',
-                'points': 'points_per_game',
-                'pointsAgainst': 'points_allowed_per_game',
-                'fieldGoalsPercentage': 'field_goal_percentage',
-                'threePointersPercentage': 'three_point_percentage',
-                'freeThrowsPercentage': 'free_throw_percentage',
-                'reboundsTotal': 'rebounds_per_game',
-                'assists': 'assists_per_game',
-                'steals': 'steals_per_game',
-                'blocks': 'blocks_per_game',
-                'turnovers': 'turnovers_per_game',
-                'offensiveRating': 'offensive_rating',
-                'defensiveRating': 'defensive_rating',
-                'pace': 'pace'
-            }
-            
-            # Map available columns
-            available_cols = [col for col in nba_columns.keys() if col in stats_data.columns]
-            stats_data = stats_data[available_cols].rename(columns=nba_columns)
-            
-            stats_data.to_sql('team_statistics', conn, if_exists='append', index=False)
-            
-            logger.info(f"✅ Saved {len(stats_data)} NBA team statistics records")
-            return len(stats_data)
+        # Merge away team rolling stats
+        features_df = features_df.merge(
+            away_rolling,
+            left_on=['away_team_id', 'game_id'],
+            right_on=['team_id', 'game_id'],
+            how='left',
+            suffixes=('', '_away_roll')
+        ).drop('team_id', axis=1, errors='ignore')
+        
+        return features_df
     
-    def save_player_statistics(self, stats_df: pd.DataFrame) -> int:
-        """Save player statistics to database."""
-        if stats_df.empty:
-            return 0
+    def _calculate_team_form_rolling(self, df: pd.DataFrame, 
+                                   team_id_col: str, window: int) -> pd.Series:
+        """Calculate rolling team form (win percentage)."""
+        team_wins = []
         
-        with sqlite3.connect(self.db_path) as conn:
-            stats_data = stats_df.copy()
+        for idx, row in df.iterrows():
+            team_id = row[team_id_col]
+            game_date = row['date']
             
-            # NBA player stats mapping
-            player_columns = {
-                'player_id': 'player_id',
-                'team_id': 'team_id',
-                'season': 'season',
-                'games': 'games_played',
-                'minutes': 'minutes_per_game',
-                'points': 'points_per_game',
-                'totReb': 'rebounds_per_game',
-                'assists': 'assists_per_game',
-                'steals': 'steals_per_game',
-                'blocks': 'blocks_per_game',
-                'fgp': 'field_goal_percentage',
-                'tpp': 'three_point_percentage',
-                'ftp': 'free_throw_percentage',
-                'turnovers': 'turnovers_per_game',
-                'per': 'player_efficiency_rating',
-                'ts': 'true_shooting_percentage',
-                'usg': 'usage_rate'
-            }
+            # Get recent games for this team before current game
+            recent_mask = (
+                (df[team_id_col] == team_id) |
+                (df['home_team_id' if 'away' in team_id_col else 'away_team_id'] == team_id)
+            ) & (df['date'] < game_date)
             
-            available_cols = [col for col in player_columns.keys() if col in stats_data.columns]
-            stats_data = stats_data[available_cols].rename(columns=player_columns)
+            recent_games = df[recent_mask].tail(window)
             
-            stats_data.to_sql('player_statistics', conn, if_exists='append', index=False)
+            if len(recent_games) == 0:
+                team_wins.append(0.5)  # Neutral form for new teams
+                continue
             
-            logger.info(f"✅ Saved {len(stats_data)} NBA player statistics records")
-            return len(stats_data)
+            # Calculate wins for this team
+            wins = 0
+            for _, game in recent_games.iterrows():
+                if game['home_team_id'] == team_id:
+                    wins += 1 if game['home_score'] > game['away_score'] else 0
+                else:
+                    wins += 1 if game['away_score'] > game['home_score'] else 0
+            
+            team_wins.append(wins / len(recent_games))
+        
+        return pd.Series(team_wins, index=df.index)
     
-    def save_games_with_odds(self, games_df: pd.DataFrame) -> int:
-        """Save games with embedded odds data."""
-        if games_df.empty:
-            return 0
+    def _calculate_win_streaks(self, df: pd.DataFrame, 
+                             team_id_col: str, streak_type: str) -> pd.Series:
+        """Calculate current win/loss streaks."""
+        streaks = []
         
-        # First save the games
-        games_saved = self.save_games(games_df)
-        
-        # Then extract and save odds if present
-        odds_columns = [col for col in games_df.columns if 'odds' in col.lower() or 'spread' in col.lower()]
-        
-        if odds_columns:
-            odds_data = []
+        for idx, row in df.iterrows():
+            team_id = row[team_id_col]
+            game_date = row['date']
             
-            for _, row in games_df.iterrows():
-                game_id = row.get('game_id')
+            # Get games before current game
+            prev_mask = (
+                (df[team_id_col] == team_id) |
+                (df['home_team_id' if 'away' in team_id_col else 'away_team_id'] == team_id)
+            ) & (df['date'] < game_date)
+            
+            prev_games = df[prev_mask].sort_values('date', ascending=False)
+            
+            streak = 0
+            for _, game in prev_games.iterrows():
+                # Determine if team won this game
+                if game['home_team_id'] == team_id:
+                    won = game['home_score'] > game['away_score']
+                else:
+                    won = game['away_score'] > game['home_score']
                 
-                if pd.notna(game_id):
-                    # Extract moneyline odds
-                    if 'moneyline_home_odds' in row and 'moneyline_away_odds' in row:
-                        odds_data.append({
-                            'game_id': game_id,
-                            'bookmaker': 'average',
-                            'market': 'moneyline',
-                            'home_odds': row.get('moneyline_home_odds'),
-                            'away_odds': row.get('moneyline_away_odds'),
-                            'spread': None,
-                            'total': None,
-                            'last_update': datetime.now()
-                        })
-                    
-                    # Extract spread odds
-                    if 'spread_home_odds' in row and 'spread_away_odds' in row:
-                        odds_data.append({
-                            'game_id': game_id,
-                            'bookmaker': 'average',
-                            'market': 'spread',
-                            'home_odds': row.get('spread_home_odds'),
-                            'away_odds': row.get('spread_away_odds'),
-                            'spread': row.get('spread_line', 0),
-                            'total': None,
-                            'last_update': datetime.now()
-                        })
-                    
-                    # Extract totals odds
-                    if 'totals_over_odds' in row and 'totals_under_odds' in row:
-                        odds_data.append({
-                            'game_id': game_id,
-                            'bookmaker': 'average',
-                            'market': 'totals',
-                            'home_odds': row.get('totals_over_odds'),
-                            'away_odds': row.get('totals_under_odds'),
-                            'spread': None,
-                            'total': row.get('totals_line'),
-                            'last_update': datetime.now()
-                        })
+                target_result = (streak_type == 'win')
+                
+                if won == target_result:
+                    streak += 1
+                else:
+                    break
             
-            if odds_data:
-                odds_df = pd.DataFrame(odds_data)
-                with sqlite3.connect(self.db_path) as conn:
-                    odds_df.to_sql('game_odds', conn, if_exists='append', index=False)
-                logger.info(f"✅ Saved {len(odds_data)} NBA odds records")
+            streaks.append(streak)
         
-        return games_saved
+        return pd.Series(streaks, index=df.index)
     
-    def get_games(self, 
-                  start_date: Optional[str] = None,
-                  end_date: Optional[str] = None,
-                  season: Optional[int] = None,
-                  team_id: Optional[int] = None) -> pd.DataFrame:
-        """Retrieve games from database."""
+    def _calculate_venue_form(self, df: pd.DataFrame, team_id_col: str, 
+                            venue: str, window: int) -> pd.Series:
+        """Calculate form at specific venue (home/away)."""
+        venue_forms = []
         
-        query = """
-        SELECT g.*, 
-               ht.name as home_team_full_name,
-               at.name as away_team_full_name
-        FROM games g
-        LEFT JOIN teams ht ON g.home_team_id = ht.team_id
-        LEFT JOIN teams at ON g.away_team_id = at.team_id
-        WHERE 1=1
-        """
+        for idx, row in df.iterrows():
+            team_id = row[team_id_col]
+            game_date = row['date']
+            
+            if venue == 'home':
+                venue_mask = (df['home_team_id'] == team_id)
+            else:
+                venue_mask = (df['away_team_id'] == team_id)
+            
+            recent_mask = venue_mask & (df['date'] < game_date)
+            recent_games = df[recent_mask].tail(window)
+            
+            if len(recent_games) == 0:
+                venue_forms.append(0.5)
+                continue
+            
+            wins = 0
+            for _, game in recent_games.iterrows():
+                if venue == 'home':
+                    wins += 1 if game['home_score'] > game['away_score'] else 0
+                else:
+                    wins += 1 if game['away_score'] > game['home_score'] else 0
+            
+            venue_forms.append(wins / len(recent_games))
         
-        params = []
-        
-        if start_date:
-            query += " AND g.date >= ?"
-            params.append(start_date)
-        if end_date:
-            query += " AND g.date <= ?"
-            params.append(end_date)
-        if season:
-            query += " AND g.season = ?"
-            params.append(season)
-        if team_id:
-            query += " AND (g.home_team_id = ? OR g.away_team_id = ?)"
-            params.extend([team_id, team_id])
-        
-        query += " ORDER BY g.date DESC, g.time DESC"
-        
-        with sqlite3.connect(self.db_path) as conn:
-            return pd.read_sql_query(query, conn, params=params)
+        return pd.Series(venue_forms, index=df.index)
     
-    def get_historical_data(self, seasons: Optional[List[int]] = None) -> pd.DataFrame:
+    def _get_historical_h2h(self, home_team: int, away_team: int, 
+                          game_date: datetime, df: pd.DataFrame) -> Dict[str, float]:
+        """Get historical head-to-head statistics."""
+        # Find all previous games between these teams
+        h2h_mask = (
+            ((df['home_team_id'] == home_team) & (df['away_team_id'] == away_team)) |
+            ((df['home_team_id'] == away_team) & (df['away_team_id'] == home_team))
+        ) & (df['date'] < game_date)
+        
+        h2h_games = df[h2h_mask]
+        
+        if len(h2h_games) == 0:
+            return {
+                'h2h_games_played': 0,
+                'h2h_home_wins': 0,
+                'h2h_home_win_pct': 0.5,
+                'h2h_avg_total': 200,  # NBA average
+                'h2h_avg_margin': 0
+            }
+        
+        # Calculate H2H statistics
+        home_wins = 0
+        total_points = []
+        margins = []
+        
+        for _, game in h2h_games.iterrows():
+            if game['home_team_id'] == home_team:
+                # Current home team was home in this H2H game
+                won = game['home_score'] > game['away_score']
+                margin = game['home_score'] - game['away_score']
+            else:
+                # Current home team was away in this H2H game
+                won = game['away_score'] > game['home_score']
+                margin = game['away_score'] - game['home_score']
+            
+            if won:
+                home_wins += 1
+            
+            total_points.append(game['home_score'] + game['away_score'])
+            margins.append(margin)
+        
+        return {
+            'h2h_games_played': len(h2h_games),
+            'h2h_home_wins': home_wins,
+            'h2h_home_win_pct': home_wins / len(h2h_games),
+            'h2h_avg_total': np.mean(total_points),
+            'h2h_avg_margin': np.mean(margins)
+        }
+    
+    def _calculate_rest_days(self, df: pd.DataFrame, team_id_col: str, 
+                           team_type: str) -> pd.Series:
+        """Calculate rest days since last game."""
+        rest_days = []
+        
+        for idx, row in df.iterrows():
+            team_id = row[team_id_col]
+            game_date = row['date']
+            
+            # Find last game for this team
+            prev_mask = (
+                (df['home_team_id'] == team_id) | (df['away_team_id'] == team_id)
+            ) & (df['date'] < game_date)
+            
+            prev_games = df[prev_mask]
+            
+            if len(prev_games) == 0:
+                rest_days.append(3)  # Default rest for first game
+            else:
+                last_game_date = prev_games['date'].max()
+                days_diff = (game_date - last_game_date).days
+                rest_days.append(max(0, days_diff - 1))  # Subtract 1 for game day
+        
+        return pd.Series(rest_days, index=df.index)
+    
+    def _count_recent_games(self, df: pd.DataFrame, team_id_col: str, days: int) -> pd.Series:
+        """Count games played in last N days."""
+        game_counts = []
+        
+        for idx, row in df.iterrows():
+            team_id = row[team_id_col]
+            game_date = row['date']
+            
+            # Count games in last N days
+            recent_mask = (
+                (df['home_team_id'] == team_id) | (df['away_team_id'] == team_id)
+            ) & (df['date'] >= game_date - timedelta(days=days)) & (df['date'] < game_date)
+            
+            game_counts.append(len(df[recent_mask]))
+        
+        return pd.Series(game_counts, index=df.index)
+    
+    def _calculate_home_court_advantage(self, df: pd.DataFrame) -> pd.Series:
+        """Calculate dynamic home court advantage."""
+        # This could be made more sophisticated with venue-specific data
+        return pd.Series([3.0] * len(df), index=df.index)  # NBA average HCA
+    
+    def _add_pace_adjusted_stats(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add pace-adjusted statistics."""
+        features_df = df.copy()
+        
+        # League average pace (could be calculated dynamically)
+        league_avg_pace = 100.0
+        
+        pace_stats = ['points_per_game', 'assists_per_game', 'rebounds_per_game']
+        
+        for team_type in ['home', 'away']:
+            pace_col = f'{team_type}_pace'
+            
+            if pace_col in features_df.columns:
+                for stat in pace_stats:
+                    stat_col = f'{team_type}_{stat}'
+                    if stat_col in features_df.columns:
+                        adj_col = f'{team_type}_{stat}_pace_adj'
+                        features_df[adj_col] = (
+                            features_df[stat_col] * league_avg_pace / 
+                            (features_df[pace_col] + 0.001)
+                        )
+        
+        return features_df
+    
+    def _add_pythagorean_expectation(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add Pythagorean expectation for wins."""
+        features_df = df.copy()
+        
+        for team_type in ['home', 'away']:
+            ppg_col = f'{team_type}_points_per_game'
+            papg_col = f'{team_type}_points_allowed_per_game'
+            
+            if ppg_col in features_df.columns and papg_col in features_df.columns:
+                pythag_col = f'{team_type}_pythagorean_wins'
+                
+                # NBA Pythagorean exponent is typically around 14
+                exponent = 14.0
+                features_df[pythag_col] = (
+                    features_df[ppg_col] ** exponent /
+                    (features_df[ppg_col] ** exponent + features_df[papg_col] ** exponent)
+                )
+        
+        # Pythagorean differential
+        if 'home_pythagorean_wins' in features_df.columns and 'away_pythagorean_wins' in features_df.columns:
+            features_df['pythagorean_diff'] = (
+                features_df['home_pythagorean_wins'] - features_df['away_pythagorean_wins']
+            )
+        
+        return features_df
+    
+    def _add_strength_of_schedule(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add strength of schedule metrics."""
+        features_df = df.copy()
+        
+        # This is a simplified SOS - could be made more sophisticated
+        for team_type in ['home', 'away']:
+            sos_values = []
+            team_id_col = f'{team_type}_team_id'
+            
+            for idx, row in features_df.iterrows():
+                team_id = row[team_id_col]
+                game_date = row['date']
+                
+                # Get recent opponents
+                recent_mask = (
+                    (df['home_team_id'] == team_id) | (df['away_team_id'] == team_id)
+                ) & (df['date'] < game_date)
+                
+                recent_games = df[recent_mask].tail(10)  # Last 10 games
+                
+                if len(recent_games) == 0:
+                    sos_values.append(0.5)  # Neutral SOS
+                    continue
+                
+                opp_win_pcts = []
+                for _, game in recent_games.iterrows():
+                    # Get opponent ID
+                    if game['home_team_id'] == team_id:
+                        opp_id = game['away_team_id']
+                    else:
+                        opp_id = game['home_team_id']
+                    
+                    # Calculate opponent's win percentage
+                    opp_mask = (
+                        (df['home_team_id'] == opp_id) | (df['away_team_id'] == opp_id)
+                    ) & (df['date'] < game_date)
+                    
+                    opp_games = df[opp_mask]
+                    if len(opp_games) > 0:
+                        opp_wins = 0
+                        for _, opp_game in opp_games.iterrows():
+                            if opp_game['home_team_id'] == opp_id:
+                                opp_wins += 1 if opp_game['home_score'] > opp_game['away_score'] else 0
+                            else:
+                                opp_wins += 1 if opp_game['away_score'] > opp_game['home_score'] else 0
+                        
+                        opp_win_pcts.append(opp_wins / len(opp_games))
+                
+                sos_values.append(np.mean(opp_win_pcts) if opp_win_pcts else 0.5)
+            
+            features_df[f'{team_type}_sos'] = sos_values
+        
+        # SOS differential
+        if 'home_sos' in features_df.columns and 'away_sos' in features_df.columns:
+            features_df['sos_diff'] = features_df['home_sos'] - features_df['away_sos']
+        
+        return features_df
+    
+    def _add_efficiency_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add efficiency metrics."""
+        features_df = df.copy()
+        
+        for team_type in ['home', 'away']:
+            # True shooting percentage
+            ppg_col = f'{team_type}_points_per_game'
+            fga_col = f'{team_type}_field_goals_attempted'  # If available
+            fta_col = f'{team_type}_free_throws_attempted'  # If available
+            
+            # Effective field goal percentage (if 3PT data available)
+            fg_pct_col = f'{team_type}_field_goal_percentage'
+            three_pct_col = f'{team_type}_three_point_percentage'
+            
+            if fg_pct_col in features_df.columns and three_pct_col in features_df.columns:
+                # Simplified eFG% calculation
+                efg_col = f'{team_type}_efg_pct'
+                features_df[efg_col] = (
+                    features_df[fg_pct_col] + 0.5 * features_df[three_pct_col]
+                )
+        
+        return features_df
+    
+    def _calculate_season_progress(self, df: pd.DataFrame) -> pd.Series:
+        """Calculate season progress (0-1 scale)."""
+        season_progress = []
+        
+        for _, row in df.iterrows():
+            season = row['season']
+            game_date = row['date']
+            
+            # NBA season typically runs October to April
+            if season:
+                season_start = datetime(season, 10, 1)  # October 1st
+                season_end = datetime(season + 1, 4, 30)  # April 30th next year
+                
+                total_days = (season_end - season_start).days
+                days_elapsed = (game_date - season_start).days
+                
+                progress = max(0, min(1, days_elapsed / total_days))
+            else:
+                progress = 0.5  # Default for missing season
+            
+            season_progress.append(progress)
+        
+        return pd.Series(season_progress, index=df.index)
+    
+    def _cleanup_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Final cleanup of features."""
+        features_df = df.copy()
+        
+        # Remove obviously non-feature columns
+        non_feature_cols = [
+            'home_team_full_name', 'away_team_full_name', 'venue', 'city',
+            'status', 'created_at', 'updated_at'
+        ]
+        
+        features_df = features_df.drop(
+            [col for col in non_feature_cols if col in features_df.columns], 
+            axis=1
+        )
+        
+        # Handle infinite values
+        features_df = features_df.replace([np.inf, -np.inf], np.nan)
+        
+        # Cap extreme values (outlier handling)
+        numeric_cols = features_df.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            if col in features_df.columns:
+                q99 = features_df[col].quantile(0.99)
+                q01 = features_df[col].quantile(0.01)
+                features_df[col] = features_df[col].clip(lower=q01, upper=q99)
+        
+        return features_df
+    
+    def get_feature_importance_mapping(self) -> Dict[str, str]:
+        """Get human-readable descriptions for features."""
+        return {
+            'home_win': 'Target: Home team won',
+            'total_points': 'Total points scored in game',
+            'point_differential': 'Home score minus away score',
+            'home_form_10': 'Home team win rate last 10 games',
+            'away_form_10': 'Away team win rate last 10 games',
+            'form_diff_10': 'Difference in 10-game form',
+            'h2h_home_win_pct': 'Home team win rate in head-to-head',
+            'rest_advantage': 'Rest days advantage (home - away)',
+            'home_court_advantage': 'Estimated home court advantage',
+            'net_rating_diff': 'Net rating differential',
+            'pythagorean_diff': 'Pythagorean win expectation diff',
+            'sos_diff': 'Strength of schedule differential'
+        }
+    
+    def create_prediction_features(self, games_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Get comprehensive historical data for model training.
+        Create features for upcoming games (prediction mode).
         
         Args:
-            seasons: List of seasons to include
+            games_df: DataFrame with upcoming games
             
         Returns:
-            DataFrame with games, team stats, and outcomes
+            DataFrame with features for prediction
         """
-        base_query = """
-        SELECT 
-            g.*,
-            ht.name as home_team_name,
-            at.name as away_team_name,
-            hts.wins as home_wins,
-            hts.losses as home_losses,
-            hts.win_percentage as home_win_pct,
-            hts.points_per_game as home_ppg,
-            hts.points_allowed_per_game as home_papg,
-            hts.offensive_rating as home_off_rating,
-            hts.defensive_rating as home_def_rating,
-            hts.pace as home_pace,
-            ats.wins as away_wins,
-            ats.losses as away_losses,
-            ats.win_percentage as away_win_pct,
-            ats.points_per_game as away_ppg,
-            ats.points_allowed_per_game as away_papg,
-            ats.offensive_rating as away_off_rating,
-            ats.defensive_rating as away_def_rating,
-            ats.pace as away_pace,
-            CASE WHEN g.home_score > g.away_score THEN 1 ELSE 0 END as home_win
-        FROM games g
-        LEFT JOIN teams ht ON g.home_team_id = ht.team_id
-        LEFT JOIN teams at ON g.away_team_id = at.team_id
-        LEFT JOIN team_statistics hts ON g.home_team_id = hts.team_id AND g.season = hts.season
-        LEFT JOIN team_statistics ats ON g.away_team_id = ats.team_id AND g.season = ats.season
-        WHERE g.status = 'Finished'
-        """
+        logger.info("🔮 Creating prediction features for upcoming games...")
         
-        params = []
-        if seasons:
-            placeholders = ','.join(['?' for _ in seasons])
-            base_query += f" AND g.season IN ({placeholders})"
-            params.extend(seasons)
+        if games_df.empty:
+            return pd.DataFrame()
         
-        base_query += " ORDER BY g.date, g.time"
+        # Get historical context for feature creation
+        historical_df = self.db.get_historical_data()
         
-        with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query(base_query, conn, params=params)
+        if historical_df.empty:
+            logger.warning("No historical data available for prediction features")
+            return games_df
         
-        logger.info(f"✅ Retrieved {len(df)} historical NBA games")
-        return df
-    
-    def get_team_statistics(self, 
-                           season: int,
-                           team_id: Optional[int] = None) -> pd.DataFrame:
-        """Get team statistics for a season."""
+        # Combine with historical data for context
+        combined_df = pd.concat([historical_df, games_df], ignore_index=True)
+        combined_df = combined_df.sort_values(['date', 'game_id'])
         
-        query = """
-        SELECT ts.*, t.name as team_name, t.code as team_code
-        FROM team_statistics ts
-        JOIN teams t ON ts.team_id = t.team_id
-        WHERE ts.season = ?
-        """
+        # Engineer features on combined data
+        features_df = self.engineer_game_features(include_advanced=True, include_situational=True)
         
-        params = [season]
+        # Return only the prediction games
+        prediction_mask = features_df['game_id'].isin(games_df['game_id'])
+        prediction_features = features_df[prediction_mask].copy()
         
-        if team_id:
-            query += " AND ts.team_id = ?"
-            params.append(team_id)
+        logger.info(f"✅ Created prediction features: {len(prediction_features)} games")
         
-        query += " ORDER BY ts.win_percentage DESC"
-        
-        with sqlite3.connect(self.db_path) as conn:
-            return pd.read_sql_query(query, conn, params=params)
-    
-    def get_player_statistics(self, 
-                             season: int,
-                             player_id: Optional[int] = None,
-                             team_id: Optional[int] = None) -> pd.DataFrame:
-        """Get player statistics for a season."""
-        
-        query = """
-        SELECT ps.*, p.name as player_name, p.position, t.name as team_name
-        FROM player_statistics ps
-        JOIN players p ON ps.player_id = p.player_id
-        JOIN teams t ON ps.team_id = t.team_id
-        WHERE ps.season = ?
-        """
-        
-        params = [season]
-        
-        if player_id:
-            query += " AND ps.player_id = ?"
-            params.append(player_id)
-        if team_id:
-            query += " AND ps.team_id = ?"
-            params.append(team_id)
-        
-        query += " ORDER BY ps.points_per_game DESC"
-        
-        with sqlite3.connect(self.db_path) as conn:
-            return pd.read_sql_query(query, conn, params=params)
-    
-    def get_data_summary(self) -> Dict[str, Any]:
-        """Get summary of data in the database."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            summary = {}
-            
-            # Games summary
-            cursor.execute("SELECT COUNT(*) FROM games")
-            summary['total_games'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(DISTINCT season) FROM games")
-            summary['seasons_available'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT MIN(date), MAX(date) FROM games")
-            date_range = cursor.fetchone()
-            summary['date_range'] = {'start': date_range[0], 'end': date_range[1]}
-            
-            # Teams summary
-            cursor.execute("SELECT COUNT(*) FROM teams")
-            summary['total_teams'] = cursor.fetchone()[0]
-            
-            # Recent games
-            cursor.execute("""
-                SELECT COUNT(*) FROM games 
-                WHERE date >= date('now', '-7 days')
-            """)
-            summary['recent_games_7d'] = cursor.fetchone()[0]
-            
-            # Statistics coverage
-            cursor.execute("SELECT COUNT(DISTINCT season) FROM team_statistics")
-            summary['team_stats_seasons'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(DISTINCT season) FROM player_statistics")
-            summary['player_stats_seasons'] = cursor.fetchone()[0]
-            
-            # Odds coverage
-            cursor.execute("SELECT COUNT(*) FROM game_odds")
-            summary['total_odds_records'] = cursor.fetchone()[0]
-        
-        return summary
-    
-    def _infer_conference(self, teams_df: pd.DataFrame) -> pd.Series:
-        """Infer NBA conference from team data."""
-        # NBA conference mapping (simplified)
-        eastern_teams = ['ATL', 'BOS', 'BKN', 'CHA', 'CHI', 'CLE', 'DET', 'IND', 
-                        'MIA', 'MIL', 'NYK', 'ORL', 'PHI', 'TOR', 'WAS']
-        
-        def get_conference(row):
-            if 'code' in row and row['code'] in eastern_teams:
-                return 'Eastern'
-            elif 'name' in row:
-                for east_team in eastern_teams:
-                    if east_team.lower() in row['name'].lower():
-                        return 'Eastern'
-            return 'Western'
-        
-        return teams_df.apply(get_conference, axis=1)
-    
-    def _infer_division(self, teams_df: pd.DataFrame) -> pd.Series:
-        """Infer NBA division from team data."""
-        # NBA division mapping (simplified)
-        divisions = {
-            'Atlantic': ['BOS', 'BKN', 'NYK', 'PHI', 'TOR'],
-            'Central': ['CHI', 'CLE', 'DET', 'IND', 'MIL'],
-            'Southeast': ['ATL', 'CHA', 'MIA', 'ORL', 'WAS'],
-            'Northwest': ['DEN', 'MIN', 'OKC', 'POR', 'UTA'],
-            'Pacific': ['GSW', 'LAC', 'LAL', 'PHX', 'SAC'],
-            'Southwest': ['DAL', 'HOU', 'MEM', 'NOP', 'SAS']
-        }
-        
-        def get_division(row):
-            team_code = row.get('code', '')
-            for division, teams in divisions.items():
-                if team_code in teams:
-                    return division
-            return 'Unknown'
-        
-        return teams_df.apply(get_division, axis=1)
-    
-    def cleanup_old_data(self, days_to_keep: int = 365):
-        """Remove old data to keep database size manageable."""
-        cutoff_date = (datetime.now() - timedelta(days=days_to_keep)).strftime('%Y-%m-%d')
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Delete old games and related data
-            cursor.execute("DELETE FROM game_odds WHERE game_id IN (SELECT game_id FROM games WHERE date < ?)", (cutoff_date,))
-            cursor.execute("DELETE FROM player_props WHERE game_id IN (SELECT game_id FROM games WHERE date < ?)", (cutoff_date,))
-            cursor.execute("DELETE FROM games WHERE date < ?", (cutoff_date,))
-            
-            conn.commit()
-            
-            logger.info(f"✅ Cleaned up NBA data older than {cutoff_date}")
-    
-    def vacuum_database(self):
-        """Optimize database storage."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("VACUUM")
-            logger.info("✅ NBA database optimized")
+        return prediction_features
