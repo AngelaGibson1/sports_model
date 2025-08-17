@@ -31,11 +31,11 @@ class UniversalSportsDataManager:
     def __init__(self, use_redis: bool = True):
         """Initialize the universal data manager."""
         logger.info("Initializing Universal Sports Data Manager...")
-        
+      
         # Initialize API clients
-        self.nba_api = SportsAPIClient(Settings.NBA_HOST)
-        self.mlb_api = SportsAPIClient(Settings.MLB_HOST)
-        self.nfl_api = SportsAPIClient(Settings.NFL_HOST)
+        self.nba_api = SportsAPIClient('nba')
+        self.mlb_api = SportsAPIClient('mlb')
+        self.nfl_api = SportsAPIClient('nfl')
         self.odds_api = OddsAPIClient()
         
         # Initialize databases
