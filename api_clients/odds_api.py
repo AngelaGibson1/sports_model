@@ -1,6 +1,3 @@
-#api_clients/odds_api.py
-
-
 import requests
 import pandas as pd
 from typing import Dict, List, Any, Optional, Union
