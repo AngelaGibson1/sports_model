@@ -19,13 +19,17 @@ class SportsAPIClient:
         """
         self.sport = sport.lower()
         
-        # Set base URL based on sport
+        # FIXED: Set correct base URLs based on our working discoveries
         if self.sport == 'nba':
-            self.base_url = Settings.NBA_API_URL
+            # NBA uses Basketball API, not dedicated NBA API
+            self.base_url = "https://v1.basketball.api-sports.io"
+            self.api_type = 'basketball'
         elif self.sport == 'mlb':
-            self.base_url = Settings.MLB_API_URL
+            self.base_url = "https://v1.baseball.api-sports.io" 
+            self.api_type = 'baseball'
         elif self.sport == 'nfl':
-            self.base_url = Settings.NFL_API_URL
+            self.base_url = "https://v1.american-football.api-sports.io"
+            self.api_type = 'american-football'
         else:
             raise ValueError(f"Unsupported sport: {sport}")
         
@@ -33,19 +37,38 @@ class SportsAPIClient:
         self.headers = create_api_sports_headers()
         self.api_helper = APIHelper(Settings.API_RATE_LIMITS.get('api_sports', Settings.API_RATE_LIMITS['rapidapi']))
         
-        # Default league IDs for each sport
+        # FIXED: Set correct league IDs and season formats based on our working script
         self.default_league_id = self._get_default_league_id()
+        self.season_format = self._get_season_format()
         
-        logger.info(f"✅ Initialized {self.sport.upper()} API client for direct API-Sports access")
+        logger.info(f"✅ Initialized {self.sport.upper()} API client - API: {self.api_type}, League: {self.default_league_id}")
     
-    def _get_default_league_id(self) -> int:
-        """Get default league ID for the sport."""
+    def _get_default_league_id(self) -> Optional[int]:
+        """Get default league ID for the sport based on our working discoveries."""
         league_ids = {
-            'nba': 12,  # NBA
-            'mlb': 1,   # MLB
-            'nfl': 1    # NFL
+            'nba': 12,    # NBA is league 12 in Basketball API ✅
+            'mlb': 1,     # MLB works with league=1 ✅  
+            'nfl': 1      # NFL works with league=1 ✅
         }
         return league_ids.get(self.sport, 1)
+    
+    def _get_season_format(self) -> str:
+        """Get season format for the sport."""
+        formats = {
+            'nba': 'hyphenated',  # "2023-2024" format
+            'mlb': 'year',        # 2024 format
+            'nfl': 'year'         # 2024 format
+        }
+        return formats.get(self.sport, 'year')
+    
+    def _format_season(self, season: int) -> Union[str, int]:
+        """Format season according to sport requirements."""
+        if self.season_format == 'hyphenated':
+            # NBA: Convert 2024 -> "2023-2024"
+            return f"{season-1}-{season}"
+        else:
+            # MLB/NFL: Use year as-is
+            return season
     
     def get_leagues(self, season: Optional[int] = None) -> pd.DataFrame:
         """
@@ -61,7 +84,7 @@ class SportsAPIClient:
         params = {}
         
         if season:
-            params['season'] = season
+            params['season'] = self._format_season(season)
         
         try:
             data = self.api_helper.make_request(url, self.headers, params)
@@ -88,22 +111,86 @@ class SportsAPIClient:
         url = f"{self.base_url}/teams"
         params = {}
         
-        # Use default league if none specified
-        if league_id:
-            params['league'] = league_id
-        elif not team_id:  # Only add default league if not searching for specific team
-            params['league'] = self.default_league_id
-            
-        if season:
-            params['season'] = season
-        if team_id:
-            params['id'] = team_id
+        # FIXED: Use working parameter logic from our script
+        if self.sport == 'nba':
+            # NBA: Use Basketball API with league 12 and hyphenated season
+            if not team_id:  # Only add league for general team queries
+                params['league'] = league_id or self.default_league_id
+            if season:
+                params['season'] = self._format_season(season)
+            if team_id:
+                params['id'] = team_id
+                
+        elif self.sport == 'mlb':
+            # MLB: Use league 1 and year season format
+            if not team_id:
+                params['league'] = league_id or self.default_league_id
+            if season:
+                params['season'] = self._format_season(season)
+            if team_id:
+                params['id'] = team_id
+                
+        elif self.sport == 'nfl':
+            # NFL: Use league 1 and year season format  
+            if not team_id:
+                params['league'] = league_id or self.default_league_id
+            if season:
+                params['season'] = self._format_season(season)
+            if team_id:
+                params['id'] = team_id
         
         try:
             data = self.api_helper.make_request(url, self.headers, params)
             return self._parse_teams_response(data)
         except APIError as e:
             logger.error(f"Error fetching teams: {e}")
+            return pd.DataFrame()
+    
+    def get_standings(self,
+                     league_id: Optional[int] = None,
+                     season: Optional[int] = None,
+                     group: Optional[str] = None) -> pd.DataFrame:
+        """
+        Get league standings using our working logic.
+        
+        Args:
+            league_id: League ID (uses default if not specified)
+            season: Season year
+            group: Optional group/conference filter
+            
+        Returns:
+            DataFrame with standings
+        """
+        url = f"{self.base_url}/standings"
+        params = {}
+        
+        # FIXED: Use the exact working parameters from our script
+        if self.sport == 'nba':
+            # NBA: Basketball API with league 12 and hyphenated season
+            params['league'] = league_id or self.default_league_id
+            if season:
+                params['season'] = self._format_season(season)
+                
+        elif self.sport == 'mlb':
+            # MLB: league 1 and year season
+            params['league'] = league_id or self.default_league_id
+            if season:
+                params['season'] = self._format_season(season)
+                
+        elif self.sport == 'nfl':
+            # NFL: league 1 and year season
+            params['league'] = league_id or self.default_league_id
+            if season:
+                params['season'] = self._format_season(season)
+        
+        if group:
+            params['group'] = group
+        
+        try:
+            data = self.api_helper.make_request(url, self.headers, params)
+            return self._parse_standings_response(data)
+        except APIError as e:
+            logger.error(f"Error fetching standings: {e}")
             return pd.DataFrame()
     
     def get_team_statistics(self,
@@ -121,21 +208,15 @@ class SportsAPIClient:
         Returns:
             DataFrame with team statistics
         """
-        # API path varies by sport
-        if self.sport == 'nba':
-            url = f"{self.base_url}/teams/statistics"
-        elif self.sport == 'mlb':
-            url = f"{self.base_url}/teams/statistics"
-        elif self.sport == 'nfl':
-            url = f"{self.base_url}/teams/statistics"
-        else:
-            url = f"{self.base_url}/teams/statistics"
+        url = f"{self.base_url}/teams/statistics"
         
         params = {
             'team': team_id,
-            'season': season,
-            'league': league_id or self.default_league_id
+            'season': self._format_season(season)
         }
+        
+        # Add league parameter for all sports now that we know NBA works with it
+        params['league'] = league_id or self.default_league_id
         
         try:
             data = self.api_helper.make_request(url, self.headers, params)
@@ -167,11 +248,15 @@ class SportsAPIClient:
         if team_id:
             params['team'] = team_id
         if season:
-            params['season'] = season
+            params['season'] = self._format_season(season)
         if player_id:
             params['id'] = player_id
         if search:
             params['search'] = search
+        
+        # Add league for consistency
+        if not player_id and not search:  # Don't add league for specific lookups
+            params['league'] = self.default_league_id
         
         try:
             data = self.api_helper.make_request(url, self.headers, params)
@@ -200,9 +285,11 @@ class SportsAPIClient:
         url = f"{self.base_url}/players/statistics"
         params = {
             'player': player_id,
-            'season': season,
-            'league': league_id or self.default_league_id
+            'season': self._format_season(season)
         }
+        
+        # Add league parameter
+        params['league'] = league_id or self.default_league_id
         
         if team_id:
             params['team'] = team_id
@@ -240,14 +327,15 @@ class SportsAPIClient:
         else:
             url = f"{self.base_url}/games"
         
-        params = {
-            'league': league_id or self.default_league_id
-        }
+        params = {}
+        
+        # Use consistent parameter logic
+        params['league'] = league_id or self.default_league_id
         
         if date:
             params['date'] = date
         if season:
-            params['season'] = season
+            params['season'] = self._format_season(season)
         if team_id:
             params['team'] = team_id
         if game_id:
@@ -294,38 +382,6 @@ class SportsAPIClient:
             logger.error(f"Error fetching H2H data: {e}")
             return pd.DataFrame()
     
-    def get_standings(self,
-                     league_id: Optional[int] = None,
-                     season: Optional[int] = None,
-                     group: Optional[str] = None) -> pd.DataFrame:
-        """
-        Get league standings.
-        
-        Args:
-            league_id: League ID (uses default if not specified)
-            season: Season year
-            group: Optional group/conference filter
-            
-        Returns:
-            DataFrame with standings
-        """
-        url = f"{self.base_url}/standings"
-        params = {
-            'league': league_id or self.default_league_id
-        }
-        
-        if season:
-            params['season'] = season
-        if group:
-            params['group'] = group
-        
-        try:
-            data = self.api_helper.make_request(url, self.headers, params)
-            return self._parse_standings_response(data)
-        except APIError as e:
-            logger.error(f"Error fetching standings: {e}")
-            return pd.DataFrame()
-    
     def get_injuries(self,
                     team_id: Optional[int] = None,
                     player_id: Optional[int] = None,
@@ -356,7 +412,7 @@ class SportsAPIClient:
         if player_id:
             params['player'] = player_id
         if season:
-            params['season'] = season
+            params['season'] = self._format_season(season)
         
         try:
             data = self.api_helper.make_request(url, self.headers, params)
@@ -365,12 +421,12 @@ class SportsAPIClient:
             logger.error(f"Error fetching injuries: {e}")
             return pd.DataFrame()
     
-    def get_seasons(self) -> List[int]:
+    def get_seasons(self) -> List[Union[int, str]]:
         """
         Get available seasons for the sport.
         
         Returns:
-            List of available season years
+            List of available season years/strings
         """
         url = f"{self.base_url}/seasons"
         
@@ -449,17 +505,20 @@ class SportsAPIClient:
             # Test with seasons endpoint (usually lightweight)
             seasons = self.get_seasons()
             
-            # Test with teams endpoint
-            teams_df = self.get_teams()
+            # Test with teams endpoint - use recent season for testing
+            test_season = 2024 if self.sport != 'nba' else 2023  # NBA uses 2023-2024
+            teams_df = self.get_teams(season=test_season)
             
             return {
                 'status': 'success',
                 'api_reachable': True,
-                'seasons_available': len(seasons),
+                'seasons_available': len(seasons) if seasons else 0,
                 'teams_found': len(teams_df),
                 'sport': self.sport,
                 'base_url': self.base_url,
-                'default_league_id': self.default_league_id
+                'default_league_id': self.default_league_id,
+                'season_format': self.season_format,
+                'api_type': self.api_type
             }
         except Exception as e:
             return {
@@ -470,7 +529,94 @@ class SportsAPIClient:
                 'base_url': self.base_url
             }
     
-    # Response parsing methods (same as before, no changes needed)
+    # FIXED: Updated parsing methods to handle our working response structures
+    def _parse_standings_response(self, data: Dict[str, Any]) -> pd.DataFrame:
+        """Parse standings API response using our working logic."""
+        if not data or 'response' not in data:
+            return pd.DataFrame()
+        
+        response = data['response']
+        if not response:
+            return pd.DataFrame()
+        
+        standings_list = []
+        
+        # Handle different response structures by sport
+        if self.sport == 'nfl':
+            # NFL: Direct list of team standings
+            for team_standing in response:
+                standings_list.append({
+                    'team_id': team_standing.get('team', {}).get('id'),
+                    'team_name': team_standing.get('team', {}).get('name'),
+                    'position': team_standing.get('position'),
+                    'conference': team_standing.get('conference'),
+                    'division': team_standing.get('division'),
+                    'wins': team_standing.get('won'),
+                    'losses': team_standing.get('lost'),
+                    'ties': team_standing.get('ties', 0)
+                })
+                
+        elif self.sport == 'mlb':
+            # MLB: List of lists (divisions)
+            for standing_group in response:
+                if isinstance(standing_group, list):
+                    for team_standing in standing_group:
+                        # Extract wins/losses from games.win.total structure
+                        wins = 'N/A'
+                        losses = 'N/A'
+                        
+                        if 'games' in team_standing:
+                            games = team_standing['games']
+                            if isinstance(games, dict):
+                                if 'win' in games and isinstance(games['win'], dict):
+                                    wins = games['win'].get('total', 'N/A')
+                                if 'lose' in games and isinstance(games['lose'], dict):
+                                    losses = games['lose'].get('total', 'N/A')
+                        
+                        standings_list.append({
+                            'team_id': team_standing.get('team', {}).get('id'),
+                            'team_name': team_standing.get('team', {}).get('name'),
+                            'position': team_standing.get('position'),
+                            'group': team_standing.get('group', {}).get('name'),
+                            'wins': wins,
+                            'losses': losses
+                        })
+                        
+        elif self.sport == 'nba':
+            # NBA: Similar to MLB structure from Basketball API
+            for standing_group in response:
+                if isinstance(standing_group, list):
+                    for team_standing in standing_group:
+                        # Extract wins/losses from games structure
+                        wins = 'N/A'
+                        losses = 'N/A'
+                        
+                        if 'games' in team_standing:
+                            games = team_standing['games']
+                            if isinstance(games, dict):
+                                if 'win' in games:
+                                    wins = games['win'].get('total', games['win']) if isinstance(games['win'], dict) else games['win']
+                                if 'lose' in games:
+                                    losses = games['lose'].get('total', games['lose']) if isinstance(games['lose'], dict) else games['lose']
+                        
+                        # Fallback to direct fields
+                        if wins == 'N/A':
+                            wins = team_standing.get('wins', team_standing.get('won', 'N/A'))
+                        if losses == 'N/A':
+                            losses = team_standing.get('losses', team_standing.get('lost', 'N/A'))
+                        
+                        standings_list.append({
+                            'team_id': team_standing.get('team', {}).get('id'),
+                            'team_name': team_standing.get('team', {}).get('name'),
+                            'position': team_standing.get('position'),
+                            'group': team_standing.get('group', {}).get('name'),
+                            'wins': wins,
+                            'losses': losses
+                        })
+        
+        return pd.DataFrame(standings_list)
+    
+    # Keep existing parsing methods for other responses
     def _parse_leagues_response(self, data: Dict[str, Any]) -> pd.DataFrame:
         """Parse leagues API response."""
         if not data or 'response' not in data:
@@ -654,36 +800,6 @@ class SportsAPIClient:
             })
         
         return pd.DataFrame(games_list)
-    
-    def _parse_standings_response(self, data: Dict[str, Any]) -> pd.DataFrame:
-        """Parse standings API response."""
-        if not data or 'response' not in data:
-            return pd.DataFrame()
-        
-        standings = data['response']
-        if not standings:
-            return pd.DataFrame()
-        
-        standings_list = []
-        for standing in standings:
-            # Handle nested standings structure
-            if 'standings' in standing:
-                for group in standing['standings']:
-                    for team in group:
-                        standings_list.append({
-                            'team_id': team.get('team', {}).get('id'),
-                            'team_name': team.get('team', {}).get('name'),
-                            'rank': team.get('rank'),
-                            'points': team.get('points'),
-                            'wins': team.get('all', {}).get('win'),
-                            'losses': team.get('all', {}).get('lose'),
-                            'draws': team.get('all', {}).get('draw'),
-                            'games_played': team.get('all', {}).get('played'),
-                            'win_percentage': team.get('percentage'),
-                            'group': team.get('group')
-                        })
-        
-        return pd.DataFrame(standings_list)
     
     def _parse_injuries_response(self, data: Dict[str, Any]) -> pd.DataFrame:
         """Parse injuries API response."""
