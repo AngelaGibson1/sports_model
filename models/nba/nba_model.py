@@ -91,7 +91,7 @@ class NBAPredictionModel:
         
         # Select feature columns
         feature_columns = [col for col in df.columns 
-                          if col not in exclude_columns and df[col].dtype in ['int64', 'float64']]
+                        if col not in exclude_columns and df[col].dtype in ['int64', 'float64']]
         
         # Prepare features
         X = df[feature_columns].copy()
@@ -108,32 +108,16 @@ class NBAPredictionModel:
             X = X[valid_idx]
             y = y[valid_idx]
         else:
-            val_pred = self.model.predict(X_val)
-            val_rmse = np.sqrt(np.mean((y_val - val_pred) ** 2))
-            val_mae = np.mean(np.abs(y_val - val_pred))
-            
-            performance_metrics = {
-                'validation_rmse': val_rmse,
-                'validation_mae': val_mae,
-                'cv_mean_rmse': np.sqrt(-cv_scores.mean()),
-                'cv_std_rmse': np.sqrt(cv_scores.std())
-            }
+            logger.warning(f"Target column '{self.target_column}' not found. Using dummy target.")
+            y = pd.Series([0] * len(X))
         
-        training_results = {
-            'model_type': self.model_type,
-            'training_samples': len(X),
-            'features_count': len(self.feature_names),
-            'cv_folds': cv_folds,
-            **performance_metrics,
-            'top_features': self._get_top_features(10),
-            'training_date': datetime.now().isoformat()
-        }
+        # Store feature names
+        self.feature_names = list(X.columns)
         
-        logger.info(f"✅ Training complete for {self.model_type}")
-        for metric, value in performance_metrics.items():
-            logger.info(f"   {metric}: {value:.4f}")
+        logger.info(f"✅ Prepared {len(X)} samples with {len(self.feature_names)} features")
+        logger.info(f"   Target: {self.target_column} (mean: {y.mean():.3f})")
         
-        return training_results
+        return X, y
     
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """
@@ -588,24 +572,25 @@ class NBAModelEnsemble:
         if meta_path.exists():
             ensemble_meta = joblib.load(meta_path)
             self.weights = ensemble_meta.get('weights', {})
+            logger.info(f"✅ Loaded ensemble metadata from {meta_path}")
+        else:
+            logger.warning(f"No ensemble metadata found at {meta_path}")
         
         # Load individual models
+        models_loaded = 0
         for model_type, model in self.models.items():
             model_path = base_path / f"{model_type}_model.joblib"
-            model.load_model(model_path)
+            if model.load_model(model_path):
+                models_loaded += 1
+                logger.info(f"✅ Loaded {model_type} model")
+            else:
+                logger.warning(f"Failed to load {model_type} model from {model_path}")
         
         logger.info(f"📦 Loaded NBA ensemble from {base_path}")
-            logger.warning(f"Target column '{self.target_column}' not found. Using dummy target.")
-            y = pd.Series([0] * len(X))
-        
-        # Store feature names
-        self.feature_names = list(X.columns)
-        
-        logger.info(f"✅ Prepared {len(X)} samples with {len(self.feature_names)} features")
-        logger.info(f"   Target: {self.target_column} (mean: {y.mean():.3f})")
-        
-        return X, y
+        logger.info(f"   Models loaded: {models_loaded}/{len(self.models)}")
+        logger.info(f"   Ensemble weights: {self.weights}")
     
+
     def train(self, df: pd.DataFrame, 
              validation_split: float = 0.2,
              cv_folds: int = 5,
@@ -689,4 +674,32 @@ class NBAModelEnsemble:
                 'cv_mean_accuracy': cv_scores.mean(),
                 'cv_std_accuracy': cv_scores.std()
             }
-        else
+        else:
+            # COMPLETE THE MISSING ELSE BLOCK FOR REGRESSION MODELS
+            val_pred = self.model.predict(X_val)
+            val_rmse = np.sqrt(np.mean((y_val - val_pred) ** 2))
+            val_mae = np.mean(np.abs(y_val - val_pred))
+            
+            performance_metrics = {
+                'validation_rmse': val_rmse,
+                'validation_mae': val_mae,
+                'cv_mean_rmse': np.sqrt(-cv_scores.mean()),
+                'cv_std_rmse': np.sqrt(cv_scores.std())
+            }
+        
+        # COMPLETE THE TRAINING RESULTS
+        training_results = {
+            'model_type': self.model_type,
+            'training_samples': len(X),
+            'features_count': len(self.feature_names),
+            'cv_folds': cv_folds,
+            **performance_metrics,
+            'top_features': self._get_top_features(10),
+            'training_date': datetime.now().isoformat()
+        }
+        
+        logger.info(f"✅ Training complete for NBA {self.model_type}")
+        for metric, value in performance_metrics.items():
+            logger.info(f"   {metric}: {value:.4f}")
+        
+        return training_results
