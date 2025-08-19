@@ -20,7 +20,7 @@ def test_mlb_database():
     # Create sample MLB game data (realistic structure)
     sample_games = pd.DataFrame({
         'game_id': [1, 2, 3, 4, 5],
-        'date': ['2024-08-15', '2024-08-16', '2024-08-17', '2024-08-18', '2024-08-19'],
+        'date': ['2025-08-15', '2025-08-16', '2025-08-17', '2025-08-18', '2025-08-19'],
         'home_team_id': [1, 2, 3, 4, 5],
         'away_team_id': [6, 7, 8, 9, 10],
         'home_team_name': ['Yankees', 'Dodgers', 'Astros', 'Braves', 'Phillies'],
@@ -28,7 +28,7 @@ def test_mlb_database():
         'home_score': [7, 4, 8, 5, 6],
         'away_score': [3, 6, 2, 7, 4],
         'status': 'Finished',
-        'season': 2024
+        'season': 2025
     })
     
     # Save to database
@@ -129,7 +129,7 @@ def suggest_mlb_next_steps():
     
     print("1. 📊 GET REAL MLB DATA:")
     print("   - Today's games and recent results")
-    print("   - Team statistics for 2024 season")
+    print("   - Team statistics for 2025 season")
     print("   - Player statistics for props")
     
     print("\n2. 🔧 CREATE MLB FEATURES:")
@@ -155,7 +155,7 @@ def main():
     """Run MLB-focused platform test."""
     print("⚾ MLB Sports Prediction Platform Setup")
     print("=" * 50)
-    print(f"🗓️ Date: {datetime.now().strftime('%Y-%m-%d')}")
+    print("🗓️ Date: {datetime.now().strftime('%Y-%m-%d')} (August 2025 - MLB Season!)")
     print("🎯 Focus: Get MLB predictions working with live data")
     
     try:
