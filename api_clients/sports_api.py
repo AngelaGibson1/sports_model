@@ -673,16 +673,196 @@ class SportsAPIClient:
                 'base_url': self.base_url
             }
     
-    # PARSING METHODS WITH IMPROVED ERROR HANDLING
+    # PARSING METHODS WITH IMPROVED NBA HANDLING
     
-    def _parse_standings_response(self, data: Dict[str, Any]) -> pd.DataFrame:
-        """Parse standings API response with improved error handling."""
+    def _parse_nba_basketball_response(self, data: Dict[str, Any], data_type: str) -> pd.DataFrame:
+        """Improved NBA Basketball API response parsing based on working logic."""
         if not data or 'response' not in data:
             return pd.DataFrame()
         
         response = data['response']
         if not response:
             return pd.DataFrame()
+        
+        if data_type == 'standings':
+            return self._parse_nba_standings_fixed(response)
+        elif data_type == 'games':
+            return self._parse_nba_games_fixed(response)
+        elif data_type == 'teams':
+            return self._parse_nba_teams_fixed(response)
+        else:
+            return pd.DataFrame()
+
+    def _parse_nba_standings_fixed(self, response: List) -> pd.DataFrame:
+        """Parse NBA standings using Basketball API format with improved error handling."""
+        # Handle string responses (error messages)
+        if isinstance(response, str):
+            logger.warning(f"NBA standings API returned string response: {response}")
+            return pd.DataFrame()
+        
+        # Handle None responses
+        if response is None:
+            logger.warning(f"NBA standings API returned None response")
+            return pd.DataFrame()
+        
+        # Handle non-list responses
+        if not isinstance(response, list):
+            logger.warning(f"NBA standings response is not a list: {type(response)}")
+            return pd.DataFrame()
+        
+        standings_list = []
+        
+        for standing_group in response:
+            if isinstance(standing_group, list):
+                # List of teams (conference/division)
+                for team_standing in standing_group:
+                    if isinstance(team_standing, dict):
+                        # Extract data using Basketball API structure - safely
+                        team_data = team_standing.get('team', {}) if isinstance(team_standing.get('team'), dict) else {}
+                        group_data = team_standing.get('group', {}) if isinstance(team_standing.get('group'), dict) else {}
+                        
+                        # Extract wins/losses from games structure
+                        wins = 'N/A'
+                        losses = 'N/A'
+                        
+                        if 'games' in team_standing:
+                            games = team_standing['games']
+                            if isinstance(games, dict):
+                                if 'win' in games:
+                                    wins = games['win'].get('total', games['win']) if isinstance(games['win'], dict) else games['win']
+                                if 'lose' in games:
+                                    losses = games['lose'].get('total', games['lose']) if isinstance(games['lose'], dict) else games['lose']
+                        
+                        # Fallback to direct fields
+                        if wins == 'N/A':
+                            wins = team_standing.get('wins', team_standing.get('won', 'N/A'))
+                        if losses == 'N/A':
+                            losses = team_standing.get('losses', team_standing.get('lost', 'N/A'))
+                        
+                        standings_list.append({
+                            'team_id': team_data.get('id') if team_data else None,
+                            'team_name': team_data.get('name') if team_data else None,
+                            'position': team_standing.get('position'),
+                            'group': group_data.get('name', 'Conference') if group_data else 'Conference',
+                            'wins': wins,
+                            'losses': losses
+                        })
+                    elif isinstance(team_standing, str):
+                        logger.warning(f"Skipping string standing entry: {team_standing}")
+                    else:
+                        logger.warning(f"Skipping unexpected standing type: {type(team_standing)}")
+            elif isinstance(standing_group, str):
+                logger.warning(f"Skipping string standing group: {standing_group}")
+            else:
+                logger.warning(f"Skipping unexpected standing group type: {type(standing_group)}")
+        
+        return pd.DataFrame(standings_list)
+    
+    def _parse_nba_games_fixed(self, response: List) -> pd.DataFrame:
+        """Parse NBA games using Basketball API format with improved error handling."""
+        # Handle string responses (error messages)
+        if isinstance(response, str):
+            logger.warning(f"NBA games API returned string response: {response}")
+            return pd.DataFrame()
+        
+        # Handle None responses
+        if response is None:
+            logger.warning(f"NBA games API returned None response")
+            return pd.DataFrame()
+        
+        # Handle non-list responses
+        if not isinstance(response, list):
+            logger.warning(f"NBA games response is not a list: {type(response)}")
+            return pd.DataFrame()
+        
+        games_list = []
+        
+        for game in response:
+            if isinstance(game, dict):
+                # Handle Basketball API game structure - safely extract nested data
+                teams = game.get('teams', {}) if isinstance(game.get('teams'), dict) else {}
+                scores = game.get('scores', {}) if isinstance(game.get('scores'), dict) else {}
+                status = game.get('status', {}) if isinstance(game.get('status'), dict) else {}
+                venue = game.get('venue', {}) if isinstance(game.get('venue'), dict) else {}
+                league = game.get('league', {}) if isinstance(game.get('league'), dict) else {}
+                
+                games_list.append({
+                    'game_id': game.get('id'),
+                    'date': game.get('date'),
+                    'time': game.get('time'),
+                    'timestamp': game.get('timestamp'),
+                    'status': status.get('long', status.get('short', 'Unknown')) if status else 'Unknown',
+                    'home_team_id': teams.get('home', {}).get('id') if teams.get('home') and isinstance(teams.get('home'), dict) else None,
+                    'home_team_name': teams.get('home', {}).get('name') if teams.get('home') and isinstance(teams.get('home'), dict) else None,
+                    'away_team_id': teams.get('away', {}).get('id') if teams.get('away') and isinstance(teams.get('away'), dict) else None,
+                    'away_team_name': teams.get('away', {}).get('name') if teams.get('away') and isinstance(teams.get('away'), dict) else None,
+                    'home_score': scores.get('home', {}).get('total') if scores.get('home') and isinstance(scores.get('home'), dict) else None,
+                    'away_score': scores.get('away', {}).get('total') if scores.get('away') and isinstance(scores.get('away'), dict) else None,
+                    'league_id': league.get('id') if league else None,
+                    'season': league.get('season') if league else None,
+                    'venue': venue.get('name') if venue else None,
+                    'city': venue.get('city') if venue else None
+                })
+            elif isinstance(game, str):
+                logger.warning(f"Skipping string game entry: {game}")
+            else:
+                logger.warning(f"Skipping unexpected game type: {type(game)}")
+        
+        return pd.DataFrame(games_list)
+
+    def _parse_nba_teams_fixed(self, response: List) -> pd.DataFrame:
+        """Parse NBA teams using Basketball API format with improved error handling."""
+        # Handle string responses (error messages)
+        if isinstance(response, str):
+            logger.warning(f"NBA teams API returned string response: {response}")
+            return pd.DataFrame()
+        
+        # Handle None responses
+        if response is None:
+            logger.warning(f"NBA teams API returned None response")
+            return pd.DataFrame()
+        
+        # Handle non-list responses
+        if not isinstance(response, list):
+            logger.warning(f"NBA teams response is not a list: {type(response)}")
+            return pd.DataFrame()
+        
+        teams_list = []
+        
+        for team in response:
+            if isinstance(team, dict):
+                teams_list.append({
+                    'team_id': team.get('id'),
+                    'name': team.get('name'),
+                    'code': team.get('code'),
+                    'logo': team.get('logo'),
+                    'city': team.get('city'),
+                    'country': team.get('country'),
+                    'founded': team.get('founded'),
+                    'national': team.get('national', False)
+                })
+            elif isinstance(team, str):
+                logger.warning(f"Skipping string team entry: {team}")
+        
+        return pd.DataFrame(teams_list)
+    
+    def _parse_standings_response(self, data: Dict[str, Any]) -> pd.DataFrame:
+        """Parse standings API response with improved NBA handling."""
+        if not data or 'response' not in data:
+            return pd.DataFrame()
+        
+        response = data['response']
+        if not response:
+            return pd.DataFrame()
+        
+        # Handle string responses (error messages)
+        if isinstance(response, str):
+            logger.warning(f"Standings API returned string response: {response}")
+            return pd.DataFrame()
+        
+        # Use improved parsing for NBA (Basketball API)
+        if self.sport == 'nba':
+            return self._parse_nba_standings_fixed(response)
         
         standings_list = []
         
@@ -728,39 +908,6 @@ class SportsAPIClient:
                                 'wins': wins,
                                 'losses': losses
                             })
-                        
-        elif self.sport == 'nba':
-            # NBA: Similar to MLB structure from Basketball API
-            for standing_group in response:
-                if isinstance(standing_group, list):
-                    for team_standing in standing_group:
-                        if isinstance(team_standing, dict):
-                            # Extract wins/losses from games structure
-                            wins = 'N/A'
-                            losses = 'N/A'
-                            
-                            if 'games' in team_standing:
-                                games = team_standing['games']
-                                if isinstance(games, dict):
-                                    if 'win' in games:
-                                        wins = games['win'].get('total', games['win']) if isinstance(games['win'], dict) else games['win']
-                                    if 'lose' in games:
-                                        losses = games['lose'].get('total', games['lose']) if isinstance(games['lose'], dict) else games['lose']
-                            
-                            # Fallback to direct fields
-                            if wins == 'N/A':
-                                wins = team_standing.get('wins', team_standing.get('won', 'N/A'))
-                            if losses == 'N/A':
-                                losses = team_standing.get('losses', team_standing.get('lost', 'N/A'))
-                            
-                            standings_list.append({
-                                'team_id': team_standing.get('team', {}).get('id'),
-                                'team_name': team_standing.get('team', {}).get('name'),
-                                'position': team_standing.get('position'),
-                                'group': team_standing.get('group', {}).get('name'),
-                                'wins': wins,
-                                'losses': losses
-                            })
         
         return pd.DataFrame(standings_list)
     
@@ -788,13 +935,22 @@ class SportsAPIClient:
         return pd.DataFrame(leagues_list)
     
     def _parse_teams_response(self, data: Dict[str, Any]) -> pd.DataFrame:
-        """Parse teams API response."""
+        """Parse teams API response with improved NBA handling."""
         if not data or 'response' not in data:
             return pd.DataFrame()
         
         teams = data['response']
         if not teams:
             return pd.DataFrame()
+        
+        # Handle string responses (error messages)
+        if isinstance(teams, str):
+            logger.warning(f"Teams API returned string response: {teams}")
+            return pd.DataFrame()
+        
+        # Use improved parsing for NBA (Basketball API)
+        if self.sport == 'nba':
+            return self._parse_nba_teams_fixed(teams)
         
         teams_list = []
         for team in teams:
@@ -942,13 +1098,22 @@ class SportsAPIClient:
         return pd.DataFrame(stats_list)
     
     def _parse_games_response(self, data: Dict[str, Any]) -> pd.DataFrame:
-        """Parse games API response."""
+        """Parse games API response with improved NBA handling."""
         if not data or 'response' not in data:
             return pd.DataFrame()
         
         games = data['response']
         if not games:
             return pd.DataFrame()
+        
+        # Handle string responses (error messages)
+        if isinstance(games, str):
+            logger.warning(f"Games API returned string response: {games}")
+            return pd.DataFrame()
+        
+        # Use improved parsing for NBA (Basketball API)
+        if self.sport == 'nba':
+            return self._parse_nba_games_fixed(games)
         
         games_list = []
         for game in games:
