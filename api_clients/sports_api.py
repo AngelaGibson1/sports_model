@@ -19,7 +19,7 @@ class SportsAPIClient:
         """
         self.sport = sport.lower()
         
-        # FIXED: Set correct base URLs based on our working discoveries
+        # Set correct base URLs based on working discoveries
         if self.sport == 'nba':
             # NBA uses Basketball API, not dedicated NBA API
             self.base_url = "https://v1.basketball.api-sports.io"
@@ -37,14 +37,14 @@ class SportsAPIClient:
         self.headers = create_api_sports_headers()
         self.api_helper = APIHelper(Settings.API_RATE_LIMITS.get('api_sports', Settings.API_RATE_LIMITS['rapidapi']))
         
-        # FIXED: Set correct league IDs and season formats based on our working script
+        # Set correct league IDs and season formats
         self.default_league_id = self._get_default_league_id()
         self.season_format = self._get_season_format()
         
         logger.info(f"✅ Initialized {self.sport.upper()} API client - API: {self.api_type}, League: {self.default_league_id}")
     
     def _get_default_league_id(self) -> Optional[int]:
-        """Get default league ID for the sport based on our working discoveries."""
+        """Get default league ID for the sport based on working discoveries."""
         league_ids = {
             'nba': 12,    # NBA is league 12 in Basketball API ✅
             'mlb': 1,     # MLB works with league=1 ✅  
@@ -61,13 +61,31 @@ class SportsAPIClient:
         }
         return formats.get(self.sport, 'year')
     
-    def _format_season(self, season: int) -> Union[str, int]:
-        """Format season according to sport requirements."""
+    def _format_season(self, season: Union[int, str]) -> Union[str, int]:
+        """Format season according to sport requirements with improved error handling."""
         if self.season_format == 'hyphenated':
-            # NBA: Convert 2024 -> "2023-2024"
+            # NBA: Convert 2024 -> "2023-2024" 
+            # Handle both int and string inputs
+            if isinstance(season, str):
+                # If already formatted like "2023-2024", return as-is
+                if '-' in season:
+                    return season
+                # If string number like "2024", convert to int first
+                try:
+                    season = int(season)
+                except ValueError:
+                    logger.warning(f"Cannot convert season '{season}' to int, returning as-is")
+                    return season  # Return as-is if can't convert
+            
             return f"{season-1}-{season}"
         else:
-            # MLB/NFL: Use year as-is
+            # MLB/NFL: Use year as-is, convert to int if string
+            if isinstance(season, str):
+                try:
+                    return int(season)
+                except ValueError:
+                    logger.warning(f"Cannot convert season '{season}' to int, returning as-is")
+                    return season
             return season
     
     def get_leagues(self, season: Optional[int] = None) -> pd.DataFrame:
@@ -111,7 +129,7 @@ class SportsAPIClient:
         url = f"{self.base_url}/teams"
         params = {}
         
-        # FIXED: Use working parameter logic from our script
+        # Use working parameter logic
         if self.sport == 'nba':
             # NBA: Use Basketball API with league 12 and hyphenated season
             if not team_id:  # Only add league for general team queries
@@ -151,7 +169,7 @@ class SportsAPIClient:
                      season: Optional[int] = None,
                      group: Optional[str] = None) -> pd.DataFrame:
         """
-        Get league standings using our working logic.
+        Get league standings using working logic.
         
         Args:
             league_id: League ID (uses default if not specified)
@@ -164,7 +182,7 @@ class SportsAPIClient:
         url = f"{self.base_url}/standings"
         params = {}
         
-        # FIXED: Use the exact working parameters from our script
+        # Use the exact working parameters
         if self.sport == 'nba':
             # NBA: Basketball API with league 12 and hyphenated season
             params['league'] = league_id or self.default_league_id
@@ -195,14 +213,14 @@ class SportsAPIClient:
     
     def get_team_statistics(self,
                            team_id: int,
-                           season: int,
+                           season: Union[int, str],
                            league_id: Optional[int] = None) -> pd.DataFrame:
         """
-        Get team statistics for a season.
+        Get team statistics for a season with improved parameter handling.
         
         Args:
             team_id: Team ID
-            season: Season year
+            season: Season year or string
             league_id: Optional league ID
             
         Returns:
@@ -210,16 +228,23 @@ class SportsAPIClient:
         """
         url = f"{self.base_url}/teams/statistics"
         
+        # Format season properly
+        formatted_season = self._format_season(season)
+        
         params = {
             'team': team_id,
-            'season': self._format_season(season)
+            'season': formatted_season,
+            'league': league_id or self.default_league_id
         }
-        
-        # Add league parameter for all sports now that we know NBA works with it
-        params['league'] = league_id or self.default_league_id
         
         try:
             data = self.api_helper.make_request(url, self.headers, params)
+            
+            # Check for error responses
+            if isinstance(data, dict) and 'error' in data:
+                logger.warning(f"API error for team stats: {data['error']}")
+                return pd.DataFrame()
+            
             return self._parse_team_stats_response(data, team_id, season)
         except APIError as e:
             logger.error(f"Error fetching team statistics: {e}")
@@ -227,17 +252,19 @@ class SportsAPIClient:
     
     def get_players(self,
                    team_id: Optional[int] = None,
-                   season: Optional[int] = None,
+                   season: Optional[Union[int, str]] = None,
                    player_id: Optional[int] = None,
-                   search: Optional[str] = None) -> pd.DataFrame:
+                   search: Optional[str] = None,
+                   page: int = 1) -> pd.DataFrame:
         """
-        Get players for the sport.
+        Get players with improved parameter handling and pagination.
         
         Args:
             team_id: Optional team filter
             season: Optional season filter
             player_id: Optional specific player ID
             search: Optional player name search
+            page: Page number for pagination
             
         Returns:
             DataFrame with player information
@@ -245,21 +272,54 @@ class SportsAPIClient:
         url = f"{self.base_url}/players"
         params = {}
         
-        if team_id:
-            params['team'] = team_id
-        if season:
-            params['season'] = self._format_season(season)
+        # Try different parameter combinations based on what works for each sport
         if player_id:
             params['id'] = player_id
-        if search:
+        elif search:
             params['search'] = search
+        else:
+            # Sport-specific parameter strategies
+            if self.sport == 'nba':
+                # NBA Basketball API approach
+                if team_id:
+                    params['team'] = team_id
+                if season:
+                    params['season'] = self._format_season(season)
+                # Add league for NBA
+                params['league'] = self.default_league_id
+                
+            elif self.sport == 'mlb':
+                # MLB approach - try without league first
+                if team_id:
+                    params['team'] = team_id
+                if season:
+                    params['season'] = self._format_season(season)
+                
+            elif self.sport == 'nfl':
+                # NFL approach
+                if team_id:
+                    params['team'] = team_id
+                if season:
+                    params['season'] = self._format_season(season)
+                params['league'] = self.default_league_id
         
-        # Add league for consistency
-        if not player_id and not search:  # Don't add league for specific lookups
-            params['league'] = self.default_league_id
+        # Add pagination
+        if page > 1:
+            params['page'] = page
         
         try:
             data = self.api_helper.make_request(url, self.headers, params)
+            
+            # If no results and we used league parameter, try without it
+            if (isinstance(data, dict) and 
+                data.get('response', []) == [] and 
+                'league' in params and 
+                not player_id and not search):
+                
+                logger.debug(f"Retrying players request without league parameter")
+                params_without_league = {k: v for k, v in params.items() if k != 'league'}
+                data = self.api_helper.make_request(url, self.headers, params_without_league)
+            
             return self._parse_players_response(data)
         except APIError as e:
             logger.error(f"Error fetching players: {e}")
@@ -267,7 +327,7 @@ class SportsAPIClient:
     
     def get_player_statistics(self,
                              player_id: int,
-                             season: int,
+                             season: Union[int, str],
                              team_id: Optional[int] = None,
                              league_id: Optional[int] = None) -> pd.DataFrame:
         """
@@ -303,13 +363,15 @@ class SportsAPIClient:
     
     def get_games(self,
                   date: Optional[str] = None,
-                  season: Optional[int] = None,
+                  season: Optional[Union[int, str]] = None,
                   league_id: Optional[int] = None,
                   team_id: Optional[int] = None,
                   game_id: Optional[int] = None,
-                  live: bool = False) -> pd.DataFrame:
+                  live: bool = False,
+                  from_date: Optional[str] = None,
+                  to_date: Optional[str] = None) -> pd.DataFrame:
         """
-        Get games/schedule information.
+        Get games with enhanced date range support.
         
         Args:
             date: Optional date filter (YYYY-MM-DD)
@@ -318,6 +380,8 @@ class SportsAPIClient:
             team_id: Optional team filter
             game_id: Optional specific game ID
             live: Get live games only
+            from_date: Start date for range
+            to_date: End date for range
             
         Returns:
             DataFrame with game information
@@ -327,13 +391,17 @@ class SportsAPIClient:
         else:
             url = f"{self.base_url}/games"
         
-        params = {}
+        params = {
+            'league': league_id or self.default_league_id
+        }
         
-        # Use consistent parameter logic
-        params['league'] = league_id or self.default_league_id
-        
+        # Handle date parameters
         if date:
             params['date'] = date
+        elif from_date and to_date:
+            params['from'] = from_date
+            params['to'] = to_date
+        
         if season:
             params['season'] = self._format_season(season)
         if team_id:
@@ -385,7 +453,7 @@ class SportsAPIClient:
     def get_injuries(self,
                     team_id: Optional[int] = None,
                     player_id: Optional[int] = None,
-                    season: Optional[int] = None) -> pd.DataFrame:
+                    season: Optional[Union[int, str]] = None) -> pd.DataFrame:
         """
         Get injury information (if available for the sport).
         
@@ -444,8 +512,84 @@ class SportsAPIClient:
             logger.error(f"Error fetching seasons: {e}")
             return []
     
+    def check_data_availability(self) -> Dict[str, Any]:
+        """
+        Check what data is actually available for this sport.
+        
+        Returns:
+            Dictionary with data availability information
+        """
+        availability = {
+            'sport': self.sport,
+            'seasons_with_teams': [],
+            'seasons_with_games': [],
+            'seasons_with_stats': [],
+            'current_season': None,
+            'working_endpoints': []
+        }
+        
+        try:
+            # Get available seasons
+            seasons = self.get_seasons()
+            if not seasons:
+                return availability
+            
+            # Test recent seasons for data availability
+            test_seasons = seasons[-5:] if len(seasons) >= 5 else seasons
+            
+            for season in test_seasons:
+                # Check teams
+                teams = self.get_teams(season=season)
+                if not teams.empty:
+                    availability['seasons_with_teams'].append(season)
+                    if 'teams' not in availability['working_endpoints']:
+                        availability['working_endpoints'].append('teams')
+                
+                # Check games (try recent date)
+                if season in [2023, 2024, '2023-2024', '2024-2025']:
+                    games = self.get_games(season=season)
+                    if not games.empty:
+                        availability['seasons_with_games'].append(season)
+                        if 'games' not in availability['working_endpoints']:
+                            availability['working_endpoints'].append('games')
+                        
+                    # Check team stats with first team
+                    if not teams.empty:
+                        first_team_id = teams.iloc[0].get('team_id', teams.iloc[0].get('id'))
+                        if first_team_id:
+                            stats = self.get_team_statistics(first_team_id, season)
+                            if not stats.empty:
+                                availability['seasons_with_stats'].append(season)
+                                if 'team_stats' not in availability['working_endpoints']:
+                                    availability['working_endpoints'].append('team_stats')
+            
+            # Check standings (usually works)
+            standings = self.get_standings()
+            if not standings.empty:
+                availability['working_endpoints'].append('standings')
+            
+            # Determine current season
+            current_year = datetime.now().year
+            if self.sport == 'nba':
+                # NBA season spans years
+                current_candidates = [f"{current_year-1}-{current_year}", current_year-1, current_year]
+            else:
+                current_candidates = [current_year, current_year-1]
+            
+            for candidate in current_candidates:
+                if candidate in availability['seasons_with_teams']:
+                    availability['current_season'] = candidate
+                    break
+            
+            return availability
+            
+        except Exception as e:
+            logger.error(f"Error checking data availability: {e}")
+            availability['error'] = str(e)
+            return availability
+    
     def get_all_team_stats_for_season(self,
-                                     season: int,
+                                     season: Union[int, str],
                                      league_id: Optional[int] = None) -> pd.DataFrame:
         """
         Get statistics for all teams in a season.
@@ -506,7 +650,7 @@ class SportsAPIClient:
             seasons = self.get_seasons()
             
             # Test with teams endpoint - use recent season for testing
-            test_season = 2024 if self.sport != 'nba' else 2023  # NBA uses 2023-2024
+            test_season = 2024 if self.sport != 'nba' else 2024
             teams_df = self.get_teams(season=test_season)
             
             return {
@@ -529,9 +673,10 @@ class SportsAPIClient:
                 'base_url': self.base_url
             }
     
-    # FIXED: Updated parsing methods to handle our working response structures
+    # PARSING METHODS WITH IMPROVED ERROR HANDLING
+    
     def _parse_standings_response(self, data: Dict[str, Any]) -> pd.DataFrame:
-        """Parse standings API response using our working logic."""
+        """Parse standings API response with improved error handling."""
         if not data or 'response' not in data:
             return pd.DataFrame()
         
@@ -545,78 +690,80 @@ class SportsAPIClient:
         if self.sport == 'nfl':
             # NFL: Direct list of team standings
             for team_standing in response:
-                standings_list.append({
-                    'team_id': team_standing.get('team', {}).get('id'),
-                    'team_name': team_standing.get('team', {}).get('name'),
-                    'position': team_standing.get('position'),
-                    'conference': team_standing.get('conference'),
-                    'division': team_standing.get('division'),
-                    'wins': team_standing.get('won'),
-                    'losses': team_standing.get('lost'),
-                    'ties': team_standing.get('ties', 0)
-                })
+                if isinstance(team_standing, dict):
+                    standings_list.append({
+                        'team_id': team_standing.get('team', {}).get('id'),
+                        'team_name': team_standing.get('team', {}).get('name'),
+                        'position': team_standing.get('position'),
+                        'conference': team_standing.get('conference'),
+                        'division': team_standing.get('division'),
+                        'wins': team_standing.get('won'),
+                        'losses': team_standing.get('lost'),
+                        'ties': team_standing.get('ties', 0)
+                    })
                 
         elif self.sport == 'mlb':
             # MLB: List of lists (divisions)
             for standing_group in response:
                 if isinstance(standing_group, list):
                     for team_standing in standing_group:
-                        # Extract wins/losses from games.win.total structure
-                        wins = 'N/A'
-                        losses = 'N/A'
-                        
-                        if 'games' in team_standing:
-                            games = team_standing['games']
-                            if isinstance(games, dict):
-                                if 'win' in games and isinstance(games['win'], dict):
-                                    wins = games['win'].get('total', 'N/A')
-                                if 'lose' in games and isinstance(games['lose'], dict):
-                                    losses = games['lose'].get('total', 'N/A')
-                        
-                        standings_list.append({
-                            'team_id': team_standing.get('team', {}).get('id'),
-                            'team_name': team_standing.get('team', {}).get('name'),
-                            'position': team_standing.get('position'),
-                            'group': team_standing.get('group', {}).get('name'),
-                            'wins': wins,
-                            'losses': losses
-                        })
+                        if isinstance(team_standing, dict):
+                            # Extract wins/losses from games.win.total structure
+                            wins = 'N/A'
+                            losses = 'N/A'
+                            
+                            if 'games' in team_standing:
+                                games = team_standing['games']
+                                if isinstance(games, dict):
+                                    if 'win' in games and isinstance(games['win'], dict):
+                                        wins = games['win'].get('total', 'N/A')
+                                    if 'lose' in games and isinstance(games['lose'], dict):
+                                        losses = games['lose'].get('total', 'N/A')
+                            
+                            standings_list.append({
+                                'team_id': team_standing.get('team', {}).get('id'),
+                                'team_name': team_standing.get('team', {}).get('name'),
+                                'position': team_standing.get('position'),
+                                'group': team_standing.get('group', {}).get('name'),
+                                'wins': wins,
+                                'losses': losses
+                            })
                         
         elif self.sport == 'nba':
             # NBA: Similar to MLB structure from Basketball API
             for standing_group in response:
                 if isinstance(standing_group, list):
                     for team_standing in standing_group:
-                        # Extract wins/losses from games structure
-                        wins = 'N/A'
-                        losses = 'N/A'
-                        
-                        if 'games' in team_standing:
-                            games = team_standing['games']
-                            if isinstance(games, dict):
-                                if 'win' in games:
-                                    wins = games['win'].get('total', games['win']) if isinstance(games['win'], dict) else games['win']
-                                if 'lose' in games:
-                                    losses = games['lose'].get('total', games['lose']) if isinstance(games['lose'], dict) else games['lose']
-                        
-                        # Fallback to direct fields
-                        if wins == 'N/A':
-                            wins = team_standing.get('wins', team_standing.get('won', 'N/A'))
-                        if losses == 'N/A':
-                            losses = team_standing.get('losses', team_standing.get('lost', 'N/A'))
-                        
-                        standings_list.append({
-                            'team_id': team_standing.get('team', {}).get('id'),
-                            'team_name': team_standing.get('team', {}).get('name'),
-                            'position': team_standing.get('position'),
-                            'group': team_standing.get('group', {}).get('name'),
-                            'wins': wins,
-                            'losses': losses
-                        })
+                        if isinstance(team_standing, dict):
+                            # Extract wins/losses from games structure
+                            wins = 'N/A'
+                            losses = 'N/A'
+                            
+                            if 'games' in team_standing:
+                                games = team_standing['games']
+                                if isinstance(games, dict):
+                                    if 'win' in games:
+                                        wins = games['win'].get('total', games['win']) if isinstance(games['win'], dict) else games['win']
+                                    if 'lose' in games:
+                                        losses = games['lose'].get('total', games['lose']) if isinstance(games['lose'], dict) else games['lose']
+                            
+                            # Fallback to direct fields
+                            if wins == 'N/A':
+                                wins = team_standing.get('wins', team_standing.get('won', 'N/A'))
+                            if losses == 'N/A':
+                                losses = team_standing.get('losses', team_standing.get('lost', 'N/A'))
+                            
+                            standings_list.append({
+                                'team_id': team_standing.get('team', {}).get('id'),
+                                'team_name': team_standing.get('team', {}).get('name'),
+                                'position': team_standing.get('position'),
+                                'group': team_standing.get('group', {}).get('name'),
+                                'wins': wins,
+                                'losses': losses
+                            })
         
         return pd.DataFrame(standings_list)
     
-    # Keep existing parsing methods for other responses
     def _parse_leagues_response(self, data: Dict[str, Any]) -> pd.DataFrame:
         """Parse leagues API response."""
         if not data or 'response' not in data:
@@ -628,14 +775,15 @@ class SportsAPIClient:
         
         leagues_list = []
         for league in leagues:
-            leagues_list.append({
-                'league_id': league.get('id'),
-                'name': league.get('name'),
-                'type': league.get('type'),
-                'logo': league.get('logo'),
-                'country': league.get('country', {}).get('name'),
-                'country_code': league.get('country', {}).get('code')
-            })
+            if isinstance(league, dict):
+                leagues_list.append({
+                    'league_id': league.get('id'),
+                    'name': league.get('name'),
+                    'type': league.get('type'),
+                    'logo': league.get('logo'),
+                    'country': league.get('country', {}).get('name'),
+                    'country_code': league.get('country', {}).get('code')
+                })
         
         return pd.DataFrame(leagues_list)
     
@@ -650,21 +798,22 @@ class SportsAPIClient:
         
         teams_list = []
         for team in teams:
-            teams_list.append({
-                'team_id': team.get('id'),
-                'name': team.get('name'),
-                'code': team.get('code'),
-                'logo': team.get('logo'),
-                'city': team.get('city'),
-                'country': team.get('country'),
-                'founded': team.get('founded'),
-                'national': team.get('national', False)
-            })
+            if isinstance(team, dict):
+                teams_list.append({
+                    'team_id': team.get('id'),
+                    'name': team.get('name'),
+                    'code': team.get('code'),
+                    'logo': team.get('logo'),
+                    'city': team.get('city'),
+                    'country': team.get('country'),
+                    'founded': team.get('founded'),
+                    'national': team.get('national', False)
+                })
         
         return pd.DataFrame(teams_list)
     
-    def _parse_team_stats_response(self, data: Dict[str, Any], team_id: int, season: int) -> pd.DataFrame:
-        """Parse team statistics response."""
+    def _parse_team_stats_response(self, data: Dict[str, Any], team_id: int, season: Union[int, str]) -> pd.DataFrame:
+        """Parse team statistics response with better error handling."""
         if not data or 'response' not in data:
             return pd.DataFrame()
         
@@ -672,35 +821,46 @@ class SportsAPIClient:
         if not response:
             return pd.DataFrame()
         
+        # Handle string responses (error messages)
+        if isinstance(response, str):
+            logger.warning(f"Team stats API returned string response: {response}")
+            return pd.DataFrame()
+        
         # Handle different response structures by sport
-        if self.sport == 'nba':
-            return self._parse_nba_team_stats(response, team_id, season)
-        elif self.sport == 'mlb':
-            return self._parse_mlb_team_stats(response, team_id, season)
-        elif self.sport == 'nfl':
-            return self._parse_nfl_team_stats(response, team_id, season)
-        else:
-            # Generic parsing
-            stats_list = []
-            for stat in response:
-                stat_data = {
-                    'team_id': team_id,
-                    'season': season,
-                    **stat
-                }
-                stats_list.append(stat_data)
-            return pd.DataFrame(stats_list)
+        try:
+            if self.sport == 'nba':
+                return self._parse_nba_team_stats(response, team_id, season)
+            elif self.sport == 'mlb':
+                return self._parse_mlb_team_stats(response, team_id, season)
+            elif self.sport == 'nfl':
+                return self._parse_nfl_team_stats(response, team_id, season)
+            else:
+                # Generic parsing with error handling
+                stats_list = []
+                if isinstance(response, list):
+                    for stat in response:
+                        if isinstance(stat, dict):
+                            stat_data = {
+                                'team_id': team_id,
+                                'season': season,
+                                **stat
+                            }
+                            stats_list.append(stat_data)
+                return pd.DataFrame(stats_list)
+        except Exception as e:
+            logger.error(f"Error parsing team stats for {self.sport}: {e}")
+            return pd.DataFrame()
     
-    def _parse_nba_team_stats(self, response: List[Dict], team_id: int, season: int) -> pd.DataFrame:
-        """Parse NBA-specific team stats."""
-        if not response:
+    def _parse_nba_team_stats(self, response: List[Dict], team_id: int, season: Union[int, str]) -> pd.DataFrame:
+        """Parse NBA-specific team stats with error handling."""
+        if not response or not isinstance(response, list):
             return pd.DataFrame()
         
         # NBA stats typically nested under 'statistics'
         for team_data in response:
-            if team_data.get('team', {}).get('id') == team_id:
+            if isinstance(team_data, dict) and team_data.get('team', {}).get('id') == team_id:
                 stats = team_data.get('statistics', [])
-                if stats:
+                if stats and isinstance(stats, list):
                     stat_data = {
                         'team_id': team_id,
                         'season': season,
@@ -710,18 +870,18 @@ class SportsAPIClient:
         
         return pd.DataFrame()
     
-    def _parse_mlb_team_stats(self, response: List[Dict], team_id: int, season: int) -> pd.DataFrame:
+    def _parse_mlb_team_stats(self, response: List[Dict], team_id: int, season: Union[int, str]) -> pd.DataFrame:
         """Parse MLB-specific team stats."""
         # Similar structure to NBA, adapt as needed
         return self._parse_nba_team_stats(response, team_id, season)
     
-    def _parse_nfl_team_stats(self, response: List[Dict], team_id: int, season: int) -> pd.DataFrame:
+    def _parse_nfl_team_stats(self, response: List[Dict], team_id: int, season: Union[int, str]) -> pd.DataFrame:
         """Parse NFL-specific team stats."""
         # Similar structure, adapt as needed
         return self._parse_nba_team_stats(response, team_id, season)
     
     def _parse_players_response(self, data: Dict[str, Any]) -> pd.DataFrame:
-        """Parse players API response."""
+        """Parse players API response with better error handling."""
         if not data or 'response' not in data:
             return pd.DataFrame()
         
@@ -729,24 +889,34 @@ class SportsAPIClient:
         if not players:
             return pd.DataFrame()
         
+        # Handle error responses
+        if isinstance(players, str):
+            logger.warning(f"Players API returned string: {players}")
+            return pd.DataFrame()
+        
+        if not isinstance(players, list):
+            logger.warning(f"Players response is not a list: {type(players)}")
+            return pd.DataFrame()
+        
         players_list = []
         for player in players:
-            players_list.append({
-                'player_id': player.get('id'),
-                'name': player.get('name'),
-                'firstname': player.get('firstname'),
-                'lastname': player.get('lastname'),
-                'age': player.get('age'),
-                'height': player.get('height'),
-                'weight': player.get('weight'),
-                'country': player.get('country'),
-                'position': player.get('position'),
-                'photo': player.get('photo')
-            })
+            if isinstance(player, dict):
+                players_list.append({
+                    'player_id': player.get('id'),
+                    'name': player.get('name'),
+                    'firstname': player.get('firstname'),
+                    'lastname': player.get('lastname'),
+                    'age': player.get('age'),
+                    'height': player.get('height'),
+                    'weight': player.get('weight'),
+                    'country': player.get('country'),
+                    'position': player.get('position'),
+                    'photo': player.get('photo')
+                })
         
         return pd.DataFrame(players_list)
     
-    def _parse_player_stats_response(self, data: Dict[str, Any], player_id: int, season: int) -> pd.DataFrame:
+    def _parse_player_stats_response(self, data: Dict[str, Any], player_id: int, season: Union[int, str]) -> pd.DataFrame:
         """Parse player statistics response."""
         if not data or 'response' not in data:
             return pd.DataFrame()
@@ -757,16 +927,17 @@ class SportsAPIClient:
         
         stats_list = []
         for player_data in response:
-            if player_data.get('player', {}).get('id') == player_id:
+            if isinstance(player_data, dict) and player_data.get('player', {}).get('id') == player_id:
                 statistics = player_data.get('statistics', [])
                 for stat in statistics:
-                    stat_data = {
-                        'player_id': player_id,
-                        'season': season,
-                        'team_id': stat.get('team', {}).get('id'),
-                        **stat
-                    }
-                    stats_list.append(stat_data)
+                    if isinstance(stat, dict):
+                        stat_data = {
+                            'player_id': player_id,
+                            'season': season,
+                            'team_id': stat.get('team', {}).get('id'),
+                            **stat
+                        }
+                        stats_list.append(stat_data)
         
         return pd.DataFrame(stats_list)
     
@@ -781,23 +952,24 @@ class SportsAPIClient:
         
         games_list = []
         for game in games:
-            games_list.append({
-                'game_id': game.get('id'),
-                'date': game.get('date'),
-                'time': game.get('time'),
-                'timestamp': game.get('timestamp'),
-                'status': game.get('status', {}).get('long'),
-                'home_team_id': game.get('teams', {}).get('home', {}).get('id'),
-                'home_team_name': game.get('teams', {}).get('home', {}).get('name'),
-                'away_team_id': game.get('teams', {}).get('away', {}).get('id'),
-                'away_team_name': game.get('teams', {}).get('away', {}).get('name'),
-                'home_score': game.get('scores', {}).get('home', {}).get('total'),
-                'away_score': game.get('scores', {}).get('away', {}).get('total'),
-                'league_id': game.get('league', {}).get('id'),
-                'season': game.get('league', {}).get('season'),
-                'venue': game.get('venue', {}).get('name'),
-                'city': game.get('venue', {}).get('city')
-            })
+            if isinstance(game, dict):
+                games_list.append({
+                    'game_id': game.get('id'),
+                    'date': game.get('date'),
+                    'time': game.get('time'),
+                    'timestamp': game.get('timestamp'),
+                    'status': game.get('status', {}).get('long'),
+                    'home_team_id': game.get('teams', {}).get('home', {}).get('id'),
+                    'home_team_name': game.get('teams', {}).get('home', {}).get('name'),
+                    'away_team_id': game.get('teams', {}).get('away', {}).get('id'),
+                    'away_team_name': game.get('teams', {}).get('away', {}).get('name'),
+                    'home_score': game.get('scores', {}).get('home', {}).get('total'),
+                    'away_score': game.get('scores', {}).get('away', {}).get('total'),
+                    'league_id': game.get('league', {}).get('id'),
+                    'season': game.get('league', {}).get('season'),
+                    'venue': game.get('venue', {}).get('name'),
+                    'city': game.get('venue', {}).get('city')
+                })
         
         return pd.DataFrame(games_list)
     
@@ -812,14 +984,15 @@ class SportsAPIClient:
         
         injuries_list = []
         for injury in injuries:
-            injuries_list.append({
-                'player_id': injury.get('player', {}).get('id'),
-                'player_name': injury.get('player', {}).get('name'),
-                'team_id': injury.get('team', {}).get('id'),
-                'team_name': injury.get('team', {}).get('name'),
-                'type': injury.get('type'),
-                'reason': injury.get('reason'),
-                'date': injury.get('date')
-            })
+            if isinstance(injury, dict):
+                injuries_list.append({
+                    'player_id': injury.get('player', {}).get('id'),
+                    'player_name': injury.get('player', {}).get('name'),
+                    'team_id': injury.get('team', {}).get('id'),
+                    'team_name': injury.get('team', {}).get('name'),
+                    'type': injury.get('type'),
+                    'reason': injury.get('reason'),
+                    'date': injury.get('date')
+                })
         
         return pd.DataFrame(injuries_list)
