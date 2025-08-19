@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Quick test script to verify NFL model works
-"""
+""" 
 
 import pandas as pd
 import numpy as np
