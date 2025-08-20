@@ -4,7 +4,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 import json
 
-
 # Load environment variables
 load_dotenv()
 
