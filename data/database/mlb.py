@@ -201,6 +201,25 @@ class MLBDatabase:
                 )
             ''')
             
+            # Starting pitchers table - NEW
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS game_starting_pitchers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id INTEGER,
+                    home_starter_id INTEGER,
+                    away_starter_id INTEGER,
+                    home_starter_confirmed BOOLEAN DEFAULT FALSE,
+                    away_starter_confirmed BOOLEAN DEFAULT FALSE,
+                    estimation_method TEXT DEFAULT 'manual',
+                    confidence_score REAL DEFAULT 1.0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (game_id) REFERENCES games (game_id),
+                    FOREIGN KEY (home_starter_id) REFERENCES players (player_id),
+                    FOREIGN KEY (away_starter_id) REFERENCES players (player_id)
+                )
+            ''')
+            
             # Create indexes
             conn.execute('CREATE INDEX IF NOT EXISTS idx_games_date ON games (date)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_games_season ON games (season)')
@@ -209,8 +228,15 @@ class MLBDatabase:
             conn.execute('CREATE INDEX IF NOT EXISTS idx_player_stats_season ON player_statistics (player_id, season)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_odds_game ON game_odds (game_id)')
             
+            # Pitcher indexes - NEW
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_game_pitchers_game_id ON game_starting_pitchers (game_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_game_pitchers_home ON game_starting_pitchers (home_starter_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_game_pitchers_away ON game_starting_pitchers (away_starter_id)')
+            
             conn.commit()
-    
+
+    # ============= SAVE METHODS =============
+
     def save_games(self, games_df: pd.DataFrame) -> int:
         """Save games data to database."""
         if games_df.empty:
@@ -381,7 +407,25 @@ class MLBDatabase:
             
             logger.info(f"✅ Saved {len(stats_data)} MLB player statistics records")
             return len(stats_data)
-    
+
+    def save_starting_pitchers(self, pitchers_df: pd.DataFrame) -> int:
+        """Save starting pitcher information for games."""
+        if pitchers_df.empty:
+            return 0
+        
+        with sqlite3.connect(self.db_path) as conn:
+            pitcher_data = pitchers_df.copy()
+            
+            # Required columns: game_id, home_starter_id, away_starter_id
+            required_cols = ['game_id', 'home_starter_id', 'away_starter_id']
+            if not all(col in pitcher_data.columns for col in required_cols):
+                logger.error(f"Missing required columns: {required_cols}")
+                return 0
+            
+            pitcher_data.to_sql('game_starting_pitchers', conn, if_exists='append', index=False)
+            logger.info(f"✅ Saved {len(pitcher_data)} starting pitcher records")
+            return len(pitcher_data)
+
     def save_games_with_odds(self, games_df: pd.DataFrame) -> int:
         """Save games with embedded odds data."""
         if games_df.empty:
@@ -446,6 +490,8 @@ class MLBDatabase:
                 logger.info(f"✅ Saved {len(odds_data)} MLB odds records")
         
         return games_saved
+
+    # ============= GET METHODS =============
     
     def get_games(self, 
                   start_date: Optional[str] = None,
@@ -600,7 +646,102 @@ class MLBDatabase:
         
         with sqlite3.connect(self.db_path) as conn:
             return pd.read_sql_query(query, conn, params=params)
-    
+
+    def get_pitcher_statistics_for_season(self, season: int, min_innings: float = 50.0) -> pd.DataFrame:
+        """Get pitcher statistics for a season with minimum innings filter."""
+        query = """
+        SELECT 
+            ps.*,
+            p.name as pitcher_name,
+            p.throws as pitcher_hand,
+            p.age,
+            t.name as team_name,
+            t.abbreviation as team_abbr
+        FROM player_statistics ps
+        JOIN players p ON ps.player_id = p.player_id
+        JOIN teams t ON ps.team_id = t.team_id
+        WHERE ps.season = ? 
+        AND ps.innings_pitched >= ?
+        AND ps.innings_pitched IS NOT NULL
+        ORDER BY ps.earned_run_average ASC
+        """
+        
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn, params=[season, min_innings])
+
+    def get_games_with_pitcher_data(self, 
+                                   start_date: Optional[str] = None,
+                                   end_date: Optional[str] = None,
+                                   season: Optional[int] = None,
+                                   include_unconfirmed: bool = False) -> pd.DataFrame:
+        """Get games with starting pitcher information included."""
+        
+        base_query = """
+        SELECT 
+            g.*,
+            ht.name as home_team_full_name,
+            ht.abbreviation as home_team_abbr,
+            at.name as away_team_full_name,
+            at.abbreviation as away_team_abbr,
+            gsp.home_starter_id,
+            gsp.away_starter_id,
+            hp.name as home_starter_name,
+            hp.throws as home_starter_hand,
+            ap.name as away_starter_name,
+            ap.throws as away_starter_hand,
+            -- Home pitcher current season stats
+            hps.earned_run_average as home_starter_era,
+            hps.whip as home_starter_whip,
+            hps.innings_pitched as home_starter_ip,
+            hps.strikeouts_pitched as home_starter_k,
+            hps.walks_allowed as home_starter_bb,
+            hps.wins as home_starter_w,
+            hps.losses as home_starter_l,
+            -- Away pitcher current season stats
+            aps.earned_run_average as away_starter_era,
+            aps.whip as away_starter_whip,
+            aps.innings_pitched as away_starter_ip,
+            aps.strikeouts_pitched as away_starter_k,
+            aps.walks_allowed as away_starter_bb,
+            aps.wins as away_starter_w,
+            aps.losses as away_starter_l
+        FROM games g
+        LEFT JOIN teams ht ON g.home_team_id = ht.team_id
+        LEFT JOIN teams at ON g.away_team_id = at.team_id
+        LEFT JOIN game_starting_pitchers gsp ON g.game_id = gsp.game_id
+        LEFT JOIN players hp ON gsp.home_starter_id = hp.player_id
+        LEFT JOIN players ap ON gsp.away_starter_id = ap.player_id
+        LEFT JOIN player_statistics hps ON hp.player_id = hps.player_id AND g.season = hps.season
+        LEFT JOIN player_statistics aps ON ap.player_id = aps.player_id AND g.season = aps.season
+        WHERE 1=1
+        """
+        
+        params = []
+        
+        if not include_unconfirmed:
+            base_query += " AND gsp.home_starter_id IS NOT NULL AND gsp.away_starter_id IS NOT NULL"
+        
+        if start_date:
+            base_query += " AND g.date >= ?"
+            params.append(start_date)
+        if end_date:
+            base_query += " AND g.date <= ?"
+            params.append(end_date)
+        if season:
+            base_query += " AND g.season = ?"
+            params.append(season)
+        
+        base_query += " ORDER BY g.date DESC, g.time DESC"
+        
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query(base_query, conn, params=params)
+        
+        # Calculate advanced pitcher metrics
+        if not df.empty:
+            df = self._add_calculated_pitcher_metrics(df)
+        
+        return df
+
     def get_data_summary(self) -> Dict[str, Any]:
         """Get summary of data in the database."""
         with sqlite3.connect(self.db_path) as conn:
@@ -641,6 +782,23 @@ class MLBDatabase:
             cursor.execute("SELECT COUNT(*) FROM game_odds")
             summary['total_odds_records'] = cursor.fetchone()[0]
             
+            # Pitcher coverage - NEW
+            cursor.execute("SELECT COUNT(*) FROM game_starting_pitchers")
+            summary['total_pitcher_assignments'] = cursor.fetchone()[0]
+            
+            cursor.execute("""
+                SELECT COUNT(DISTINCT gsp.game_id) as games_with_pitchers,
+                       COUNT(DISTINCT g.game_id) as total_finished_games
+                FROM games g
+                LEFT JOIN game_starting_pitchers gsp ON g.game_id = gsp.game_id
+                WHERE g.status = 'Finished'
+            """)
+            pitcher_coverage = cursor.fetchone()
+            if pitcher_coverage[1] > 0:
+                summary['pitcher_coverage_pct'] = (pitcher_coverage[0] / pitcher_coverage[1]) * 100
+            else:
+                summary['pitcher_coverage_pct'] = 0
+            
             # League breakdown
             cursor.execute("""
                 SELECT league, COUNT(*) 
@@ -651,77 +809,251 @@ class MLBDatabase:
             summary['teams_by_league'] = dict(cursor.fetchall())
         
         return summary
-    
-    def _add_mlb_team_info(self, teams_df: pd.DataFrame) -> pd.DataFrame:
-        """Add MLB-specific team information."""
-        teams_data = teams_df.copy()
+
+    # ============= PITCHER-SPECIFIC METHODS =============
+
+    def get_enhanced_pitcher_matchup_data(self, game_id: int) -> Dict[str, Any]:
+        """Get comprehensive pitcher matchup data for a game."""
+        query = """
+        SELECT 
+            g.game_id,
+            g.season,
+            g.date,
+            gsp.home_starter_id,
+            gsp.away_starter_id,
+            -- Home pitcher stats
+            hp.name as home_pitcher_name,
+            hp.throws as home_pitcher_hand,
+            hp.age as home_pitcher_age,
+            hps.earned_run_average as home_era,
+            hps.whip as home_whip,
+            hps.innings_pitched as home_ip,
+            hps.strikeouts_pitched as home_k,
+            hps.walks_allowed as home_bb,
+            hps.hits_allowed as home_h,
+            hps.wins as home_w,
+            hps.losses as home_l,
+            -- Away pitcher stats  
+            ap.name as away_pitcher_name,
+            ap.throws as away_pitcher_hand,
+            ap.age as away_pitcher_age,
+            aps.earned_run_average as away_era,
+            aps.whip as away_whip,
+            aps.innings_pitched as away_ip,
+            aps.strikeouts_pitched as away_k,
+            aps.walks_allowed as away_bb,
+            aps.hits_allowed as away_h,
+            aps.wins as away_w,
+            aps.losses as away_l
+        FROM games g
+        JOIN game_starting_pitchers gsp ON g.game_id = gsp.game_id
+        LEFT JOIN players hp ON gsp.home_starter_id = hp.player_id
+        LEFT JOIN players ap ON gsp.away_starter_id = ap.player_id
+        LEFT JOIN player_statistics hps ON hp.player_id = hps.player_id AND g.season = hps.season
+        LEFT JOIN player_statistics aps ON ap.player_id = aps.player_id AND g.season = aps.season
+        WHERE g.game_id = ?
+        """
         
-        # MLB division/league mapping
-        mlb_divisions = {
-            'AL East': ['BOS', 'NYY', 'TB', 'TOR', 'BAL'],
-            'AL Central': ['CLE', 'DET', 'KC', 'CWS', 'MIN'],
-            'AL West': ['HOU', 'LAA', 'OAK', 'SEA', 'TEX'],
-            'NL East': ['ATL', 'MIA', 'NYM', 'PHI', 'WAS'],
-            'NL Central': ['CHC', 'CIN', 'MIL', 'PIT', 'STL'],
-            'NL West': ['ARI', 'COL', 'LAD', 'SD', 'SF']
+        with sqlite3.connect(self.db_path) as conn:
+            result = pd.read_sql_query(query, conn, params=[game_id])
+            
+            if result.empty:
+                # Fallback to placeholder data
+                return {
+                    'game_id': game_id,
+                    'home_starter': {
+                        'name': 'Unknown Pitcher',
+                        'era': 4.00,
+                        'whip': 1.30,
+                        'k9': 8.0
+                    },
+                    'away_starter': {
+                        'name': 'Unknown Pitcher',
+                        'era': 4.00,
+                        'whip': 1.30,
+                        'k9': 8.0
+                    }
+                }
+            
+            row = result.iloc[0]
+            
+            # Calculate advanced metrics
+            home_k9 = (row['home_k'] / row['home_ip']) * 9 if row['home_ip'] and row['home_ip'] > 0 else 8.0
+            away_k9 = (row['away_k'] / row['away_ip']) * 9 if row['away_ip'] and row['away_ip'] > 0 else 8.0
+            home_bb9 = (row['home_bb'] / row['home_ip']) * 9 if row['home_ip'] and row['home_ip'] > 0 else 3.0
+            away_bb9 = (row['away_bb'] / row['away_ip']) * 9 if row['away_ip'] and row['away_ip'] > 0 else 3.0
+            
+            return {
+                'game_id': game_id,
+                'home_starter': {
+                    'player_id': row['home_starter_id'],
+                    'name': row['home_pitcher_name'] or 'Unknown',
+                    'hand': row['home_pitcher_hand'] or 'R',
+                    'age': row['home_pitcher_age'] or 28,
+                    'era': row['home_era'] or 4.00,
+                    'whip': row['home_whip'] or 1.30,
+                    'k9': home_k9,
+                    'bb9': home_bb9,
+                    'innings_pitched': row['home_ip'] or 100.0,
+                    'wins': row['home_w'] or 8,
+                    'losses': row['home_l'] or 8
+                },
+                'away_starter': {
+                    'player_id': row['away_starter_id'],
+                    'name': row['away_pitcher_name'] or 'Unknown',
+                    'hand': row['away_pitcher_hand'] or 'R',
+                    'age': row['away_pitcher_age'] or 28,
+                    'era': row['away_era'] or 4.00,
+                    'whip': row['away_whip'] or 1.30,
+                    'k9': away_k9,
+                    'bb9': away_bb9,
+                    'innings_pitched': row['away_ip'] or 100.0,
+                    'wins': row['away_w'] or 8,
+                    'losses': row['away_l'] or 8
+                },
+                'matchup_analysis': {
+                    'era_advantage': 'home' if (row['home_era'] or 4.0) < (row['away_era'] or 4.0) else 'away',
+                    'era_differential': abs((row['home_era'] or 4.0) - (row['away_era'] or 4.0)),
+                    'whip_advantage': 'home' if (row['home_whip'] or 1.3) < (row['away_whip'] or 1.3) else 'away',
+                    'k9_advantage': 'home' if home_k9 > away_k9 else 'away',
+                    'handedness_matchup': f"{row['home_pitcher_hand'] or 'R'} vs {row['away_pitcher_hand'] or 'R'}"
+                }
+            }
+
+    def get_pitcher_recent_form(self, pitcher_id: int, games: int = 5) -> Dict[str, Any]:
+        """Get recent form statistics for a pitcher."""
+        # This would require game-by-game pitcher logs
+        # For now, return season stats
+        query = """
+        SELECT * FROM player_statistics ps
+        JOIN players p ON ps.player_id = p.player_id
+        WHERE ps.player_id = ?
+        ORDER BY ps.season DESC
+        LIMIT 1
+        """
+        
+        with sqlite3.connect(self.db_path) as conn:
+            result = pd.read_sql_query(query, conn, params=[pitcher_id])
+        
+        if result.empty:
+            return {
+                'games_started': 0,
+                'era': 4.00,
+                'whip': 1.30,
+                'k9': 8.0,
+                'form_trend': 'unknown'
+            }
+        
+        row = result.iloc[0]
+        innings = row.get('innings_pitched', 100.0)
+        
+        return {
+            'games_started': int(innings / 6) if innings else 0,  # Rough estimate
+            'era': row.get('earned_run_average', 4.00),
+            'whip': row.get('whip', 1.30),
+            'k9': (row.get('strikeouts_pitched', 0) / innings * 9) if innings > 0 else 8.0,
+            'bb9': (row.get('walks_allowed', 0) / innings * 9) if innings > 0 else 3.0,
+            'wins': row.get('wins', 0),
+            'losses': row.get('losses', 0),
+            'form_trend': 'stable'  # Would need game-by-game data for real trend
         }
+
+    def analyze_pitcher_matchup_history(self, pitcher1_id: int, pitcher2_id: int) -> Dict[str, Any]:
+        """Analyze historical matchups between two pitchers."""
+        # This would require more detailed game logs
+        # For now, return comparative stats
         
-        # Stadium information
-        mlb_stadiums = {
-            'BOS': 'Fenway Park',
-            'NYY': 'Yankee Stadium',
-            'TB': 'Tropicana Field',
-            'TOR': 'Rogers Centre',
-            'BAL': 'Oriole Park at Camden Yards',
-            'CLE': 'Progressive Field',
-            'DET': 'Comerica Park',
-            'KC': 'Kauffman Stadium',
-            'CWS': 'Guaranteed Rate Field',
-            'MIN': 'Target Field',
-            'HOU': 'Minute Maid Park',
-            'LAA': 'Angel Stadium',
-            'OAK': 'RingCentral Coliseum',
-            'SEA': 'T-Mobile Park',
-            'TEX': 'Globe Life Field',
-            'ATL': 'Truist Park',
-            'MIA': 'loanDepot park',
-            'NYM': 'Citi Field',
-            'PHI': 'Citizens Bank Park',
-            'WAS': 'Nationals Park',
-            'CHC': 'Wrigley Field',
-            'CIN': 'Great American Ball Park',
-            'MIL': 'American Family Field',
-            'PIT': 'PNC Park',
-            'STL': 'Busch Stadium',
-            'ARI': 'Chase Field',
-            'COL': 'Coors Field',
-            'LAD': 'Dodger Stadium',
-            'SD': 'Petco Park',
-            'SF': 'Oracle Park'
+        pitcher1_stats = self.get_pitcher_recent_form(pitcher1_id)
+        pitcher2_stats = self.get_pitcher_recent_form(pitcher2_id)
+        
+        return {
+            'head_to_head_games': 0,  # Would need game logs
+            'pitcher1_advantage': pitcher1_stats['era'] < pitcher2_stats['era'],
+            'era_comparison': {
+                'pitcher1': pitcher1_stats['era'],
+                'pitcher2': pitcher2_stats['era'],
+                'difference': abs(pitcher1_stats['era'] - pitcher2_stats['era'])
+            },
+            'strikeout_comparison': {
+                'pitcher1': pitcher1_stats['k9'],
+                'pitcher2': pitcher2_stats['k9'],
+                'difference': abs(pitcher1_stats['k9'] - pitcher2_stats['k9'])
+            },
+            'recommendation': 'favor_pitcher1' if pitcher1_stats['era'] < pitcher2_stats['era'] else 'favor_pitcher2'
         }
+
+    def estimate_starting_pitchers_for_games(self):
+        """Estimate starting pitchers for games missing pitcher data."""
+        logger.info("🔍 Estimating starting pitchers for games without pitcher data...")
         
-        def get_division_info(row):
-            abbr = row.get('abbreviation', '')
-            for division, teams in mlb_divisions.items():
-                if abbr in teams:
-                    league = division.split()[0]  # AL or NL
-                    div_name = division.split()[1]    # East, Central, West
-                    return pd.Series([league, div_name])
-            return pd.Series(['Unknown', 'Unknown'])
-        
-        def get_stadium(row):
-            abbr = row.get('abbreviation', '')
-            return mlb_stadiums.get(abbr, 'Unknown Stadium')
-        
-        if 'abbreviation' in teams_data.columns:
-            teams_data[['league', 'division']] = teams_data.apply(get_division_info, axis=1)
-            teams_data['stadium'] = teams_data.apply(get_stadium, axis=1)
-        else:
-            teams_data['league'] = 'Unknown'
-            teams_data['division'] = 'Unknown'
-            teams_data['stadium'] = 'Unknown Stadium'
-        
-        return teams_data
+        with sqlite3.connect(self.db_path) as conn:
+            # Find games without pitcher assignments
+            games_query = """
+            SELECT g.game_id, g.home_team_id, g.away_team_id, g.date, g.season
+            FROM games g
+            LEFT JOIN game_starting_pitchers gsp ON g.game_id = gsp.game_id
+            WHERE gsp.game_id IS NULL
+            AND g.status = 'Finished'
+            ORDER BY g.date
+            """
+            
+            games_without_pitchers = pd.read_sql_query(games_query, conn)
+            
+            if games_without_pitchers.empty:
+                logger.info("✅ All games already have pitcher assignments")
+                return
+            
+            # Get available pitchers for each team/season
+            pitchers_query = """
+            SELECT ps.player_id, ps.team_id, ps.season, ps.wins, ps.losses, 
+                   ps.innings_pitched, ps.earned_run_average,
+                   p.name
+            FROM player_statistics ps
+            JOIN players p ON ps.player_id = p.player_id
+            WHERE ps.innings_pitched > 30  -- Filter for actual starters
+            ORDER BY ps.team_id, ps.season, ps.innings_pitched DESC
+            """
+            
+            available_pitchers = pd.read_sql_query(pitchers_query, conn)
+            
+            estimated_assignments = []
+            
+            for _, game in games_without_pitchers.iterrows():
+                # Find pitchers for home team
+                home_pitchers = available_pitchers[
+                    (available_pitchers['team_id'] == game['home_team_id']) &
+                    (available_pitchers['season'] == game['season'])
+                ].head(5)  # Top 5 starters
+                
+                # Find pitchers for away team  
+                away_pitchers = available_pitchers[
+                    (available_pitchers['team_id'] == game['away_team_id']) &
+                    (available_pitchers['season'] == game['season'])
+                ].head(5)  # Top 5 starters
+                
+                if not home_pitchers.empty and not away_pitchers.empty:
+                    # Use simple rotation estimate (would be much more sophisticated in reality)
+                    home_starter = home_pitchers.iloc[0]['player_id']  # Ace
+                    away_starter = away_pitchers.iloc[0]['player_id']  # Ace
+                    
+                    estimated_assignments.append({
+                        'game_id': game['game_id'],
+                        'home_starter_id': home_starter,
+                        'away_starter_id': away_starter,
+                        'home_starter_confirmed': False,
+                        'away_starter_confirmed': False,
+                        'estimation_method': 'rotation_estimate',
+                        'confidence_score': 0.6
+                    })
+            
+            if estimated_assignments:
+                assignments_df = pd.DataFrame(estimated_assignments)
+                assignments_df.to_sql('game_starting_pitchers', conn, if_exists='append', index=False)
+                logger.info(f"✅ Estimated starting pitchers for {len(estimated_assignments)} games")
+            else:
+                logger.warning("⚠️ Could not estimate starting pitchers - insufficient pitcher data")
+
+    # ============= UTILITY METHODS =============
     
     def cleanup_old_data(self, days_to_keep: int = 365):
         """Remove old data to keep database size manageable."""
@@ -733,6 +1065,7 @@ class MLBDatabase:
             # Delete old games and related data
             cursor.execute("DELETE FROM game_odds WHERE game_id IN (SELECT game_id FROM games WHERE date < ?)", (cutoff_date,))
             cursor.execute("DELETE FROM player_props WHERE game_id IN (SELECT game_id FROM games WHERE date < ?)", (cutoff_date,))
+            cursor.execute("DELETE FROM game_starting_pitchers WHERE game_id IN (SELECT game_id FROM games WHERE date < ?)", (cutoff_date,))
             cursor.execute("DELETE FROM games WHERE date < ?", (cutoff_date,))
             
             conn.commit()
@@ -809,20 +1142,185 @@ class MLBDatabase:
             return pd.read_sql_query(query, conn, params=[team1_id, team2_id, team2_id, team1_id, limit])
     
     def get_pitcher_matchup_data(self, game_id: int) -> Dict[str, Any]:
-        """Get pitcher matchup data for a game (placeholder for future implementation)."""
-        # This would require additional pitcher tables and data
-        # For now, return placeholder data
-        return {
-            'home_starter': {
-                'name': 'Unknown Pitcher',
-                'era': 4.00,
-                'whip': 1.30,
-                'strikeouts_per_nine': 8.0
-            },
-            'away_starter': {
-                'name': 'Unknown Pitcher',
-                'era': 4.00,
-                'whip': 1.30,
-                'strikeouts_per_nine': 8.0
-            }
+        """Get pitcher matchup data for a game - now enhanced with real data!"""
+        return self.get_enhanced_pitcher_matchup_data(game_id)
+
+    # ============= HELPER METHODS =============
+    
+    def _add_mlb_team_info(self, teams_df: pd.DataFrame) -> pd.DataFrame:
+        """Add MLB-specific team information."""
+        teams_data = teams_df.copy()
+        
+        # MLB division/league mapping
+        mlb_divisions = {
+            'AL East': ['BOS', 'NYY', 'TB', 'TOR', 'BAL'],
+            'AL Central': ['CLE', 'DET', 'KC', 'CWS', 'MIN'],
+            'AL West': ['HOU', 'LAA', 'OAK', 'SEA', 'TEX'],
+            'NL East': ['ATL', 'MIA', 'NYM', 'PHI', 'WAS'],
+            'NL Central': ['CHC', 'CIN', 'MIL', 'PIT', 'STL'],
+            'NL West': ['ARI', 'COL', 'LAD', 'SD', 'SF']
         }
+        
+        # Stadium information
+        mlb_stadiums = {
+            'BOS': 'Fenway Park',
+            'NYY': 'Yankee Stadium',
+            'TB': 'Tropicana Field',
+            'TOR': 'Rogers Centre',
+            'BAL': 'Oriole Park at Camden Yards',
+            'CLE': 'Progressive Field',
+            'DET': 'Comerica Park',
+            'KC': 'Kauffman Stadium',
+            'CWS': 'Guaranteed Rate Field',
+            'MIN': 'Target Field',
+            'HOU': 'Minute Maid Park',
+            'LAA': 'Angel Stadium',
+            'OAK': 'RingCentral Coliseum',
+            'SEA': 'T-Mobile Park',
+            'TEX': 'Globe Life Field',
+            'ATL': 'Truist Park',
+            'MIA': 'loanDepot park',
+            'NYM': 'Citi Field',
+            'PHI': 'Citizens Bank Park',
+            'WAS': 'Nationals Park',
+            'CHC': 'Wrigley Field',
+            'CIN': 'Great American Ball Park',
+            'MIL': 'American Family Field',
+            'PIT': 'PNC Park',
+            'STL': 'Busch Stadium',
+            'ARI': 'Chase Field',
+            'COL': 'Coors Field',
+            'LAD': 'Dodger Stadium',
+            'SD': 'Petco Park',
+            'SF': 'Oracle Park'
+        }
+        
+        def get_division_info(row):
+            abbr = row.get('abbreviation', '')
+            for division, teams in mlb_divisions.items():
+                if abbr in teams:
+                    league = division.split()[0]  # AL or NL
+                    div_name = division.split()[1]    # East, Central, West
+                    return pd.Series([league, div_name])
+            return pd.Series(['Unknown', 'Unknown'])
+        
+        def get_stadium(row):
+            abbr = row.get('abbreviation', '')
+            return mlb_stadiums.get(abbr, 'Unknown Stadium')
+        
+        if 'abbreviation' in teams_data.columns:
+            teams_data[['league', 'division']] = teams_data.apply(get_division_info, axis=1)
+            teams_data['stadium'] = teams_data.apply(get_stadium, axis=1)
+        else:
+            teams_data['league'] = 'Unknown'
+            teams_data['division'] = 'Unknown'
+            teams_data['stadium'] = 'Unknown Stadium'
+        
+        return teams_data
+
+    def _add_calculated_pitcher_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add calculated pitcher metrics to games dataframe."""
+        result_df = df.copy()
+        
+        # Calculate K/9 (strikeouts per 9 innings)
+        for team in ['home', 'away']:
+            ip_col = f'{team}_starter_ip'
+            k_col = f'{team}_starter_k'
+            k9_col = f'{team}_starter_k9'
+            
+            if ip_col in result_df.columns and k_col in result_df.columns:
+                result_df[k9_col] = np.where(
+                    (result_df[ip_col].notna()) & (result_df[ip_col] > 0),
+                    (result_df[k_col] / result_df[ip_col]) * 9,
+                    8.0  # League average
+                )
+            
+            # Calculate BB/9 (walks per 9 innings)
+            bb_col = f'{team}_starter_bb'
+            bb9_col = f'{team}_starter_bb9'
+            
+            if ip_col in result_df.columns and bb_col in result_df.columns:
+                result_df[bb9_col] = np.where(
+                    (result_df[ip_col].notna()) & (result_df[ip_col] > 0),
+                    (result_df[bb_col] / result_df[ip_col]) * 9,
+                    3.0  # League average
+                )
+            
+            # Calculate K/BB ratio
+            kbb_col = f'{team}_starter_k_bb_ratio'
+            if k_col in result_df.columns and bb_col in result_df.columns:
+                result_df[kbb_col] = np.where(
+                    (result_df[bb_col].notna()) & (result_df[bb_col] > 0),
+                    result_df[k_col] / result_df[bb_col],
+                    2.5  # League average
+                )
+        
+        # Calculate pitcher vs pitcher metrics
+        if all(col in result_df.columns for col in ['home_starter_era', 'away_starter_era']):
+            result_df['era_differential'] = result_df['home_starter_era'] - result_df['away_starter_era']
+            result_df['era_advantage_home'] = (result_df['home_starter_era'] < result_df['away_starter_era']).astype(int)
+        
+        if all(col in result_df.columns for col in ['home_starter_whip', 'away_starter_whip']):
+            result_df['whip_differential'] = result_df['home_starter_whip'] - result_df['away_starter_whip']
+            result_df['whip_advantage_home'] = (result_df['home_starter_whip'] < result_df['away_starter_whip']).astype(int)
+        
+        if all(col in result_df.columns for col in ['home_starter_k9', 'away_starter_k9']):
+            result_df['k9_differential'] = result_df['home_starter_k9'] - result_df['away_starter_k9']
+            result_df['k9_advantage_home'] = (result_df['home_starter_k9'] > result_df['away_starter_k9']).astype(int)
+        
+        return result_df
+
+    def _calculate_pitcher_quality(self, pitcher):
+        """Calculate a simple pitcher quality score."""
+        era = pitcher.get('earned_run_average', 4.50)
+        innings = pitcher.get('innings_pitched', 100)
+        
+        # Normalize ERA (lower is better, scale 0-1)
+        era_score = max(0, (6.0 - era) / 6.0)
+        
+        # Normalize innings (more innings = more reliable, scale 0-1)  
+        innings_score = min(1.0, innings / 200.0)
+        
+        # Combined score
+        return (era_score * 0.7 + innings_score * 0.3)
+
+    # ============= SETUP AND MIGRATION =============
+
+    def setup_pitcher_integration(self):
+        """One-time setup for pitcher integration. Run this once."""
+        logger.info("🔧⚾ Setting up pitcher integration...")
+        
+        # Create the pitcher table if it doesn't exist
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS game_starting_pitchers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id INTEGER,
+                    home_starter_id INTEGER,
+                    away_starter_id INTEGER,
+                    home_starter_confirmed BOOLEAN DEFAULT FALSE,
+                    away_starter_confirmed BOOLEAN DEFAULT FALSE,
+                    estimation_method TEXT DEFAULT 'manual',
+                    confidence_score REAL DEFAULT 1.0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (game_id) REFERENCES games (game_id),
+                    FOREIGN KEY (home_starter_id) REFERENCES players (player_id),
+                    FOREIGN KEY (away_starter_id) REFERENCES players (player_id)
+                )
+            ''')
+            
+            # Create indexes
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_game_pitchers_game_id ON game_starting_pitchers (game_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_game_pitchers_home ON game_starting_pitchers (home_starter_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_game_pitchers_away ON game_starting_pitchers (away_starter_id)')
+            conn.commit()
+        
+        # Estimate pitchers for existing games
+        self.estimate_starting_pitchers_for_games()
+        
+        # Get summary
+        summary = self.get_data_summary()
+        logger.info(f"✅ Pitcher integration setup complete!")
+        logger.info(f"   Games with pitcher data: {summary.get('total_pitcher_assignments', 0)}")
+        logger.info(f"   Pitcher coverage: {summary.get('pitcher_coverage_pct', 0):.1f}%")
