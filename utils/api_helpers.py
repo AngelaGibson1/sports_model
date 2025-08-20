@@ -296,6 +296,8 @@ def create_odds_api_headers() -> Dict[str, str]:
         "Accept": "application/json"
     }
 
+
+
 def validate_api_response(data: Dict[str, Any], required_fields: List[str]) -> bool:
     """
     Validate that an API response contains required fields.
