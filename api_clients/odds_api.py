@@ -3,7 +3,7 @@ import pandas as pd
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime, timedelta
 from loguru import logger
-import time 
+import time
 
 from config.settings import Settings
 from utils.api_helpers import APIHelper, APIError, create_odds_api_headers
