@@ -1,7 +1,8 @@
-# models/mlb/mlb_enhanced_integrated.py
+# mlb_enhanced_integrated.py
 """
 Enhanced MLB trainer integrated with your working data pipeline.
-Combines your multi-model approach with our working 15K+ game dataset.
+Now includes starting pitcher data and advanced pitcher-aware features.
+Combines your multi-model approach with pitcher matchup analysis.
 """
 
 import pandas as pd
@@ -32,19 +33,24 @@ warnings.filterwarnings('ignore')
 
 from loguru import logger
 from config.settings import Settings
+from data.database.mlb import MLBDatabase
 
 class IntegratedMLBEnhancedTrainer:
     """
     Enhanced multi-model trainer integrated with your working MLB data pipeline.
-    Uses your 15K+ games with advanced model comparison and selection.
+    Now includes starting pitcher data and advanced pitcher-aware features.
+    Uses your 15K+ games with pitcher matchup analysis for superior predictions.
     """
     
-    def __init__(self, model_dir: Path = Path('models/mlb/enhanced'), 
+    def __init__(self, model_dir: Path = Path('models/mlb/enhanced_with_pitchers'), 
                  random_state: int = 42):
-        """Initialize the integrated enhanced trainer."""
+        """Initialize the integrated enhanced trainer with pitcher awareness."""
         self.model_dir = Path(model_dir)
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.random_state = random_state
+        
+        # Initialize database connection
+        self.db = MLBDatabase()
         
         # Store all trained models
         self.models = {}
@@ -59,75 +65,83 @@ class IntegratedMLBEnhancedTrainer:
         self.training_results = {}
         self.database_schema = None
         
-        # Model configurations optimized for your MLB data
-        self.model_configs = self._get_mlb_optimized_configs()
+        # Model configurations optimized for pitcher-aware MLB data
+        self.model_configs = self._get_pitcher_optimized_configs()
         
-        logger.info("🎯 Initialized Enhanced MLB Trainer")
+        logger.info("🎯⚾ Initialized Enhanced MLB Trainer with Pitcher Integration")
     
-    def _get_mlb_optimized_configs(self) -> Dict:
-        """Get model configurations optimized for MLB prediction."""
+    def _get_pitcher_optimized_configs(self) -> Dict:
+        """Get model configurations optimized for pitcher-aware MLB prediction."""
         return {
-            'xgboost_mlb': {
+            'xgboost_pitcher_mlb': {
                 'model_class': xgb.XGBClassifier,
                 'param_grid': {
-                    'n_estimators': [200, 300, 500],
-                    'max_depth': [4, 6, 8],
-                    'learning_rate': [0.05, 0.1, 0.15],
+                    'n_estimators': [300, 500, 800],
+                    'max_depth': [6, 8, 10],
+                    'learning_rate': [0.05, 0.08, 0.1, 0.12],
                     'subsample': [0.8, 0.9],
                     'colsample_bytree': [0.8, 0.9],
-                    'scale_pos_weight': [0.85, 0.9, 0.95],  # Adjust for 52.9% home win rate
+                    'scale_pos_weight': [0.85, 0.9, 0.95],
+                    'reg_alpha': [0, 0.1, 0.3],  # L1 regularization for pitcher features
+                    'reg_lambda': [1, 1.5, 2],   # L2 regularization
                     'random_state': [self.random_state]
                 },
                 'quick_params': {
-                    'n_estimators': 300,
-                    'max_depth': 6,
-                    'learning_rate': 0.1,
+                    'n_estimators': 500,
+                    'max_depth': 8,
+                    'learning_rate': 0.08,
                     'subsample': 0.8,
                     'colsample_bytree': 0.8,
-                    'scale_pos_weight': 0.89,  # For 52.9% home win rate
+                    'scale_pos_weight': 0.89,
+                    'reg_alpha': 0.1,
+                    'reg_lambda': 1.5,
                     'random_state': self.random_state,
                     'eval_metric': 'logloss',
                     'use_label_encoder': False
                 }
             },
             
-            'lightgbm_mlb': {
+            'lightgbm_pitcher_mlb': {
                 'model_class': lgb.LGBMClassifier,
                 'param_grid': {
-                    'n_estimators': [200, 300, 500],
-                    'num_leaves': [31, 50, 100],
-                    'learning_rate': [0.05, 0.1, 0.15],
-                    'feature_fraction': [0.8, 0.9],
-                    'bagging_fraction': [0.8, 0.9],
+                    'n_estimators': [300, 500, 800],
+                    'num_leaves': [50, 100, 150],
+                    'learning_rate': [0.05, 0.08, 0.1, 0.12],
+                    'feature_fraction': [0.7, 0.8, 0.9],
+                    'bagging_fraction': [0.7, 0.8, 0.9],
                     'min_child_samples': [20, 30, 50],
+                    'reg_alpha': [0, 0.1, 0.3],
+                    'reg_lambda': [0, 0.1, 0.3],
                     'random_state': [self.random_state]
                 },
                 'quick_params': {
-                    'n_estimators': 300,
-                    'num_leaves': 50,
-                    'learning_rate': 0.1,
+                    'n_estimators': 500,
+                    'num_leaves': 100,
+                    'learning_rate': 0.08,
                     'feature_fraction': 0.8,
                     'bagging_fraction': 0.8,
                     'min_child_samples': 30,
+                    'reg_alpha': 0.1,
+                    'reg_lambda': 0.1,
                     'random_state': self.random_state,
                     'verbosity': -1
                 }
             },
             
-            'random_forest_mlb': {
+            'random_forest_pitcher_mlb': {
                 'model_class': RandomForestClassifier,
                 'param_grid': {
-                    'n_estimators': [300, 500, 1000],
-                    'max_depth': [15, 20, 25],
+                    'n_estimators': [500, 800, 1200],
+                    'max_depth': [20, 25, 30],
                     'min_samples_split': [2, 5, 10],
                     'min_samples_leaf': [1, 2, 4],
-                    'max_features': ['sqrt', 'log2'],
+                    'max_features': ['sqrt', 'log2', 0.8],
                     'class_weight': ['balanced', 'balanced_subsample'],
                     'random_state': [self.random_state]
                 },
                 'quick_params': {
-                    'n_estimators': 500,
-                    'max_depth': 20,
+                    'n_estimators': 800,
+                    'max_depth': 25,
                     'min_samples_split': 5,
                     'min_samples_leaf': 2,
                     'max_features': 'sqrt',
@@ -137,49 +151,49 @@ class IntegratedMLBEnhancedTrainer:
                 }
             },
             
-            'gradient_boosting_mlb': {
+            'gradient_boosting_pitcher_mlb': {
                 'model_class': GradientBoostingClassifier,
                 'param_grid': {
-                    'n_estimators': [200, 300, 500],
-                    'max_depth': [4, 6, 8],
-                    'learning_rate': [0.05, 0.1, 0.15],
+                    'n_estimators': [300, 500, 800],
+                    'max_depth': [6, 8, 10],
+                    'learning_rate': [0.05, 0.08, 0.1],
                     'subsample': [0.8, 0.9],
                     'min_samples_split': [5, 10, 20],
                     'random_state': [self.random_state]
                 },
                 'quick_params': {
-                    'n_estimators': 300,
-                    'max_depth': 6,
-                    'learning_rate': 0.1,
+                    'n_estimators': 500,
+                    'max_depth': 8,
+                    'learning_rate': 0.08,
                     'subsample': 0.8,
                     'min_samples_split': 10,
                     'random_state': self.random_state
                 }
             },
             
-            'neural_network_mlb': {
+            'neural_network_pitcher_mlb': {
                 'model_class': MLPClassifier,
                 'param_grid': {
-                    'hidden_layer_sizes': [(100, 50), (150, 75), (200, 100, 50)],
+                    'hidden_layer_sizes': [(150, 75), (200, 100, 50), (250, 125, 75)],
                     'activation': ['relu', 'tanh'],
                     'alpha': [0.001, 0.01, 0.1],
                     'learning_rate_init': [0.001, 0.01],
-                    'max_iter': [1000, 2000],
+                    'max_iter': [2000, 3000],
                     'random_state': [self.random_state]
                 },
                 'quick_params': {
-                    'hidden_layer_sizes': (150, 75),
+                    'hidden_layer_sizes': (200, 100, 50),
                     'activation': 'relu',
                     'alpha': 0.01,
                     'learning_rate_init': 0.001,
-                    'max_iter': 2000,
+                    'max_iter': 3000,
                     'random_state': self.random_state,
                     'early_stopping': True,
                     'validation_fraction': 0.1
                 }
             },
             
-            'logistic_regression_mlb': {
+            'logistic_regression_pitcher_mlb': {
                 'model_class': LogisticRegression,
                 'param_grid': {
                     'C': [0.1, 1, 10, 100],
@@ -194,81 +208,252 @@ class IntegratedMLBEnhancedTrainer:
                     'solver': 'liblinear',
                     'class_weight': 'balanced',
                     'random_state': self.random_state,
-                    'max_iter': 2000
+                    'max_iter': 3000
                 }
             }
         }
     
-    def load_mlb_data_from_database(self) -> Tuple[pd.DataFrame, pd.Series]:
-        """Load and prepare MLB data from your working database."""
-        logger.info("📊 Loading MLB data from your working database...")
+    def load_mlb_data_with_pitchers(self) -> Tuple[pd.DataFrame, pd.Series]:
+        """Load and prepare MLB data with pitcher integration from your working database."""
+        logger.info("📊⚾ Loading MLB data with pitcher integration from your working database...")
         
         try:
-            with sqlite3.connect(Settings.MLB_DB_PATH) as conn:
-                # Load finished games with comprehensive data
-                query = """
-                SELECT 
-                    g.*,
-                    hts.win_percentage as home_team_win_pct,
-                    hts.runs_per_game as home_runs_per_game,
-                    hts.runs_allowed_per_game as home_runs_allowed,
-                    ats.win_percentage as away_team_win_pct,
-                    ats.runs_per_game as away_runs_per_game,
-                    ats.runs_allowed_per_game as away_runs_allowed
-                FROM games g
-                LEFT JOIN team_statistics hts ON g.home_team_id = hts.team_id AND g.season = hts.season
-                LEFT JOIN team_statistics ats ON g.away_team_id = ats.team_id AND g.season = ats.season
-                WHERE g.status = 'Finished' 
-                AND g.home_score IS NOT NULL 
-                AND g.away_score IS NOT NULL
-                ORDER BY g.date
-                """
-                
-                data = pd.read_sql_query(query, conn)
-                
-                if data.empty:
-                    raise ValueError("No finished games found in database!")
-                
-                logger.info(f"✅ Loaded {len(data)} finished games")
-                
-                # Create target variable
-                y = (data['home_score'] > data['away_score']).astype(int)
-                
-                logger.info(f"📊 Home team win rate: {y.mean():.1%}")
-                
-                return data, y
+            # First, ensure pitcher integration is set up
+            self.db.setup_pitcher_integration()
+            
+            # Load games with pitcher data using the enhanced method
+            data = self.db.get_games_with_pitcher_data(include_unconfirmed=False)
+            
+            if data.empty:
+                logger.warning("No games with pitcher data found! Falling back to team-only data...")
+                return self._load_fallback_data()
+            
+            # Filter for finished games only
+            data = data[data['status'] == 'Finished']
+            data = data.dropna(subset=['home_score', 'away_score'])
+            
+            if data.empty:
+                logger.warning("No finished games with pitcher data! Falling back to team-only data...")
+                return self._load_fallback_data()
+            
+            logger.info(f"✅ Loaded {len(data)} finished games with pitcher data")
+            
+            # Create target variable
+            y = (data['home_score'] > data['away_score']).astype(int)
+            
+            # Get coverage statistics
+            total_finished = len(self.db.get_games(season=None))
+            coverage_pct = (len(data) / total_finished * 100) if total_finished > 0 else 0
+            
+            logger.info(f"📊 Home team win rate: {y.mean():.1%}")
+            logger.info(f"📊 Pitcher data coverage: {coverage_pct:.1f}% of all games")
+            logger.info(f"⚾ PITCHER INTEGRATION SUCCESSFUL!")
+            
+            return data, y
                 
         except Exception as e:
-            logger.error(f"❌ Error loading MLB data: {e}")
-            raise
+            logger.error(f"❌ Error loading MLB data with pitchers: {e}")
+            logger.info("🔄 Falling back to team-only data...")
+            return self._load_fallback_data()
     
-    def engineer_advanced_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Engineer advanced features for MLB prediction."""
-        logger.info("🔧 Engineering advanced MLB features...")
+    def _load_fallback_data(self) -> Tuple[pd.DataFrame, pd.Series]:
+        """Fallback to team-only data if pitcher data unavailable."""
+        logger.warning("⚠️ Using fallback team-only data (no pitcher features)")
+        
+        with sqlite3.connect(Settings.MLB_DB_PATH) as conn:
+            query = """
+            SELECT 
+                g.*,
+                hts.win_percentage as home_team_win_pct,
+                hts.runs_per_game as home_runs_per_game,
+                hts.runs_allowed_per_game as home_runs_allowed,
+                hts.batting_average as home_team_ba,
+                hts.on_base_percentage as home_team_obp,
+                hts.slugging_percentage as home_team_slg,
+                hts.earned_run_average as home_team_era,
+                hts.whip as home_team_whip,
+                ats.win_percentage as away_team_win_pct,
+                ats.runs_per_game as away_runs_per_game,
+                ats.runs_allowed_per_game as away_runs_allowed,
+                ats.batting_average as away_team_ba,
+                ats.on_base_percentage as away_team_obp,
+                ats.slugging_percentage as away_team_slg,
+                ats.earned_run_average as away_team_era,
+                ats.whip as away_team_whip
+            FROM games g
+            LEFT JOIN team_statistics hts ON g.home_team_id = hts.team_id AND g.season = hts.season
+            LEFT JOIN team_statistics ats ON g.away_team_id = ats.team_id AND g.season = ats.season
+            WHERE g.status = 'Finished' 
+            AND g.home_score IS NOT NULL 
+            AND g.away_score IS NOT NULL
+            ORDER BY g.date
+            """
+            
+            data = pd.read_sql_query(query, conn)
+            y = (data['home_score'] > data['away_score']).astype(int)
+            
+            logger.info(f"✅ Loaded {len(data)} finished games (team-only)")
+            
+            return data, y
+    
+    def engineer_pitcher_aware_features(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Engineer comprehensive features including pitcher-specific metrics."""
+        logger.info("🔧⚾ Engineering pitcher-aware features for MLB prediction...")
         
         feature_data = data.copy()
-        
-        # === BASIC GAME FEATURES ===
         features = []
         
-        # Team IDs (encode them)
-        if 'home_team_id' in feature_data.columns:
-            features.append('home_team_id')
-        if 'away_team_id' in feature_data.columns:
-            features.append('away_team_id')
+        # === BASIC GAME FEATURES ===
+        basic_features = ['home_team_id', 'away_team_id', 'season']
+        for feat in basic_features:
+            if feat in feature_data.columns:
+                features.append(feat)
         
-        # Season
-        if 'season' in feature_data.columns:
-            features.append('season')
+        # === TEAM PERFORMANCE FEATURES ===
+        team_features = [
+            'home_team_win_pct', 'away_team_win_pct',
+            'home_runs_per_game', 'away_runs_per_game',
+            'home_runs_allowed', 'away_runs_allowed',
+            'home_team_ba', 'away_team_ba',
+            'home_team_obp', 'away_team_obp',
+            'home_team_slg', 'away_team_slg',
+            'home_team_era', 'away_team_era',
+            'home_team_whip', 'away_team_whip'
+        ]
         
-        # === DERIVED FEATURES ===
-        # Total runs and run differential
-        if 'home_score' in feature_data.columns and 'away_score' in feature_data.columns:
-            feature_data['total_runs'] = feature_data['home_score'] + feature_data['away_score']
-            feature_data['run_differential'] = feature_data['home_score'] - feature_data['away_score']
-            feature_data['high_scoring'] = (feature_data['total_runs'] > 10).astype(int)
-            feature_data['close_game'] = (abs(feature_data['run_differential']) <= 2).astype(int)
-            features.extend(['total_runs', 'run_differential', 'high_scoring', 'close_game'])
+        for feat in team_features:
+            if feat in feature_data.columns:
+                features.append(feat)
+        
+        # === STARTING PITCHER FEATURES ===
+        pitcher_features = [
+            'home_starter_era', 'away_starter_era',
+            'home_starter_whip', 'away_starter_whip',
+            'home_starter_ip', 'away_starter_ip',
+            'home_starter_k', 'away_starter_k',
+            'home_starter_bb', 'away_starter_bb',
+            'home_starter_w', 'away_starter_w',
+            'home_starter_l', 'away_starter_l',
+            'home_starter_k9', 'away_starter_k9',
+            'home_starter_bb9', 'away_starter_bb9',
+            'home_starter_k_bb_ratio', 'away_starter_k_bb_ratio'
+        ]
+        
+        pitcher_features_found = []
+        for feat in pitcher_features:
+            if feat in feature_data.columns:
+                pitcher_features_found.append(feat)
+                features.append(feat)
+        
+        logger.info(f"   📊 Found {len(pitcher_features_found)} pitcher features in data")
+        
+        # === CALCULATED PITCHER DIFFERENTIALS ===
+        # ERA differential (negative means home pitcher advantage)
+        if all(col in feature_data.columns for col in ['home_starter_era', 'away_starter_era']):
+            feature_data['era_differential'] = feature_data['home_starter_era'] - feature_data['away_starter_era']
+            feature_data['era_advantage_home'] = (feature_data['home_starter_era'] < feature_data['away_starter_era']).astype(int)
+            features.extend(['era_differential', 'era_advantage_home'])
+        
+        # WHIP differential  
+        if all(col in feature_data.columns for col in ['home_starter_whip', 'away_starter_whip']):
+            feature_data['whip_differential'] = feature_data['home_starter_whip'] - feature_data['away_starter_whip']
+            feature_data['whip_advantage_home'] = (feature_data['home_starter_whip'] < feature_data['away_starter_whip']).astype(int)
+            features.extend(['whip_differential', 'whip_advantage_home'])
+        
+        # K/9 differential
+        if all(col in feature_data.columns for col in ['home_starter_k9', 'away_starter_k9']):
+            feature_data['k9_differential'] = feature_data['home_starter_k9'] - feature_data['away_starter_k9']
+            feature_data['k9_advantage_home'] = (feature_data['home_starter_k9'] > feature_data['away_starter_k9']).astype(int)
+            features.extend(['k9_differential', 'k9_advantage_home'])
+        
+        # === PITCHER EXPERIENCE FEATURES ===
+        if all(col in feature_data.columns for col in ['home_starter_w', 'home_starter_l']):
+            feature_data['home_starter_games'] = feature_data['home_starter_w'] + feature_data['home_starter_l']
+            feature_data['home_starter_win_pct'] = np.where(
+                feature_data['home_starter_games'] > 0,
+                feature_data['home_starter_w'] / feature_data['home_starter_games'],
+                0.5
+            )
+            features.extend(['home_starter_games', 'home_starter_win_pct'])
+        
+        if all(col in feature_data.columns for col in ['away_starter_w', 'away_starter_l']):
+            feature_data['away_starter_games'] = feature_data['away_starter_w'] + feature_data['away_starter_l']
+            feature_data['away_starter_win_pct'] = np.where(
+                feature_data['away_starter_games'] > 0,
+                feature_data['away_starter_w'] / feature_data['away_starter_games'],
+                0.5
+            )
+            features.extend(['away_starter_games', 'away_starter_win_pct'])
+        
+        # === PITCHER VS TEAM OFFENSE MATCHUPS ===
+        # Pitcher ERA vs opposing team offense
+        if all(col in feature_data.columns for col in ['home_starter_era', 'away_runs_per_game']):
+            feature_data['home_pitcher_vs_away_offense'] = feature_data['home_starter_era'] - feature_data['away_runs_per_game']
+            features.append('home_pitcher_vs_away_offense')
+        
+        if all(col in feature_data.columns for col in ['away_starter_era', 'home_runs_per_game']):
+            feature_data['away_pitcher_vs_home_offense'] = feature_data['away_starter_era'] - feature_data['home_runs_per_game']
+            features.append('away_pitcher_vs_home_offense')
+        
+        # === HANDEDNESS FEATURES ===
+        if 'home_starter_hand' in feature_data.columns:
+            feature_data['home_starter_lefty'] = (feature_data['home_starter_hand'] == 'L').astype(int)
+            features.append('home_starter_lefty')
+        
+        if 'away_starter_hand' in feature_data.columns:
+            feature_data['away_starter_lefty'] = (feature_data['away_starter_hand'] == 'L').astype(int)
+            features.append('away_starter_lefty')
+        
+        if all(col in feature_data.columns for col in ['home_starter_hand', 'away_starter_hand']):
+            feature_data['both_starters_lefty'] = ((feature_data['home_starter_hand'] == 'L') & 
+                                                  (feature_data['away_starter_hand'] == 'L')).astype(int)
+            feature_data['both_starters_righty'] = ((feature_data['home_starter_hand'] == 'R') & 
+                                                   (feature_data['away_starter_hand'] == 'R')).astype(int)
+            feature_data['mixed_handedness'] = ((feature_data['home_starter_hand'] == 'L') & 
+                                               (feature_data['away_starter_hand'] == 'R')).astype(int) | \
+                                             ((feature_data['home_starter_hand'] == 'R') & 
+                                               (feature_data['away_starter_hand'] == 'L')).astype(int)
+            features.extend(['both_starters_lefty', 'both_starters_righty', 'mixed_handedness'])
+        
+        # === COMPOSITE PITCHER QUALITY SCORES ===
+        # Create overall pitcher quality scores
+        if all(col in feature_data.columns for col in ['home_starter_era', 'home_starter_whip', 'home_starter_k9']):
+            # Lower ERA and WHIP are better, higher K/9 is better
+            feature_data['home_pitcher_quality'] = (
+                (5.0 - feature_data['home_starter_era'].clip(0, 5)) * 0.4 +
+                (2.0 - feature_data['home_starter_whip'].clip(0.8, 2.0)) * 0.3 +
+                (feature_data['home_starter_k9'].clip(4, 15) / 15) * 0.3
+            )
+            features.append('home_pitcher_quality')
+        
+        if all(col in feature_data.columns for col in ['away_starter_era', 'away_starter_whip', 'away_starter_k9']):
+            feature_data['away_pitcher_quality'] = (
+                (5.0 - feature_data['away_starter_era'].clip(0, 5)) * 0.4 +
+                (2.0 - feature_data['away_starter_whip'].clip(0.8, 2.0)) * 0.3 +
+                (feature_data['away_starter_k9'].clip(4, 15) / 15) * 0.3
+            )
+            features.append('away_pitcher_quality')
+        
+        # Pitcher quality differential
+        if all(col in feature_data.columns for col in ['home_pitcher_quality', 'away_pitcher_quality']):
+            feature_data['pitcher_quality_diff'] = feature_data['home_pitcher_quality'] - feature_data['away_pitcher_quality']
+            feature_data['pitcher_quality_advantage_home'] = (feature_data['home_pitcher_quality'] > feature_data['away_pitcher_quality']).astype(int)
+            features.extend(['pitcher_quality_diff', 'pitcher_quality_advantage_home'])
+        
+        # === DERIVED GAME FEATURES ===
+        # NOTE: We CANNOT use actual game scores (home_score, away_score) as features
+        # because that would be data leakage - the model would just look at who scored more
+        # Instead, we can only use pre-game information for prediction
+        
+        # We can add venue/situational features if available
+        if 'venue' in feature_data.columns:
+            # Create venue encoding or home field advantage indicators
+            pass  # Would need venue-specific data
+        
+        # Add day/night game indicators if available
+        if 'time' in feature_data.columns:
+            # Could parse time to determine day/night games
+            pass  # Would need time parsing
         
         # === DATE/TIME FEATURES ===
         if 'date' in feature_data.columns:
@@ -286,29 +471,11 @@ class IntegratedMLBEnhancedTrainer:
             except Exception as e:
                 logger.warning(f"Date feature creation failed: {e}")
         
-        # === TEAM PERFORMANCE FEATURES ===
-        # Win percentages
-        if 'home_team_win_pct' in feature_data.columns:
-            features.append('home_team_win_pct')
-        if 'away_team_win_pct' in feature_data.columns:
-            features.append('away_team_win_pct')
-        
+        # === TEAM DIFFERENTIALS ===
         # Win percentage differential
         if all(col in feature_data.columns for col in ['home_team_win_pct', 'away_team_win_pct']):
-            feature_data['win_pct_diff'] = feature_data['home_team_win_pct'] - feature_data['away_team_win_pct']
-            features.append('win_pct_diff')
-        
-        # Offensive metrics
-        if 'home_runs_per_game' in feature_data.columns:
-            features.append('home_runs_per_game')
-        if 'away_runs_per_game' in feature_data.columns:
-            features.append('away_runs_per_game')
-        
-        # Defensive metrics
-        if 'home_runs_allowed' in feature_data.columns:
-            features.append('home_runs_allowed')
-        if 'away_runs_allowed' in feature_data.columns:
-            features.append('away_runs_allowed')
+            feature_data['team_win_pct_diff'] = feature_data['home_team_win_pct'] - feature_data['away_team_win_pct']
+            features.append('team_win_pct_diff')
         
         # Offensive vs Defensive matchups
         if all(col in feature_data.columns for col in ['home_runs_per_game', 'away_runs_allowed']):
@@ -336,14 +503,31 @@ class IntegratedMLBEnhancedTrainer:
         except Exception as e:
             logger.warning(f"Head-to-head features failed: {e}")
         
-        # === FEATURE SELECTION ===
+        # === FEATURE SELECTION AND CLEANUP ===
         # Only keep features that exist and have reasonable data
         available_features = []
+        
+        # Data leakage prevention - exclude any features that could reveal the game outcome
+        prohibited_features = [
+            'home_score', 'away_score', 'total_runs', 'run_differential', 
+            'high_scoring', 'close_game', 'winner', 'result', 'final_score'
+        ]
+        
         for feat in features:
             if feat in feature_data.columns:
+                # Check for data leakage
+                if any(prohibited in feat.lower() for prohibited in prohibited_features):
+                    logger.warning(f"   ⚠️ Skipping potential data leakage feature: {feat}")
+                    continue
+                    
                 missing_pct = feature_data[feat].isnull().sum() / len(feature_data)
-                if missing_pct < 0.5:  # Keep features with <50% missing
+                if missing_pct < 0.6:  # Keep features with <60% missing (relaxed for pitcher data)
                     available_features.append(feat)
+        
+        if not available_features:
+            raise ValueError("No valid features available after data leakage prevention!")
+            
+        logger.info(f"   ✅ Kept {len(available_features)} features after data leakage check")
         
         # Final feature matrix
         X = feature_data[available_features].copy()
@@ -359,18 +543,48 @@ class IntegratedMLBEnhancedTrainer:
                     try:
                         X[feat] = self.label_encoders[feat].transform(X[feat].astype(str))
                     except ValueError:
-                        # Handle unseen categories
                         X[feat] = 0
         
-        # Handle missing values
+        # Handle missing values intelligently
         for col in X.columns:
             if X[col].dtype in ['object']:
                 X[col] = X[col].fillna('unknown')
             else:
                 X[col] = pd.to_numeric(X[col], errors='coerce')
-                X[col] = X[col].fillna(X[col].median())
+                
+                # Use smarter defaults for pitcher stats
+                if 'era' in col.lower():
+                    X[col] = X[col].fillna(4.00)  # League average ERA
+                elif 'whip' in col.lower():
+                    X[col] = X[col].fillna(1.30)  # League average WHIP
+                elif 'k9' in col.lower():
+                    X[col] = X[col].fillna(8.0)   # League average K/9
+                elif 'bb9' in col.lower():
+                    X[col] = X[col].fillna(3.0)   # League average BB/9
+                elif 'win_pct' in col.lower():
+                    X[col] = X[col].fillna(0.5)   # Neutral win rate
+                elif 'quality' in col.lower():
+                    X[col] = X[col].fillna(0.5)   # Neutral quality score
+                else:
+                    X[col] = X[col].fillna(X[col].median())
         
-        logger.info(f"✅ Engineered {len(X.columns)} features for {len(X)} games")
+        # Calculate feature breakdown
+        pitcher_features_count = len([col for col in X.columns if any(keyword in col.lower() for keyword in 
+                                                                     ['starter', 'era', 'whip', 'pitcher', 'k9', 'bb9', 'quality'])])
+        team_features_count = len([col for col in X.columns if 'team' in col.lower()])
+        
+        logger.info(f"✅ Engineered {len(X.columns)} total features for {len(X)} games")
+        logger.info(f"   📊 Feature breakdown:")
+        logger.info(f"      ⚾ Pitcher features: {pitcher_features_count}")
+        logger.info(f"      🏟️ Team features: {team_features_count}")
+        logger.info(f"      📅 Other features: {len(X.columns) - pitcher_features_count - team_features_count}")
+        
+        if pitcher_features_count > 10:
+            logger.info("   🎯 EXCELLENT PITCHER FEATURE COVERAGE!")
+        elif pitcher_features_count > 5:
+            logger.info("   ⚾ Good pitcher feature coverage")
+        else:
+            logger.warning("   ⚠️ Limited pitcher features - may fall back to team-based model")
         
         return X
     
@@ -419,20 +633,22 @@ class IntegratedMLBEnhancedTrainer:
         
         return h2h_features.fillna(0)
     
-    def select_features_advanced(self, X: pd.DataFrame, y: pd.Series, 
-                                method: str = 'importance', 
-                                n_features: int = 50) -> pd.DataFrame:
-        """Advanced feature selection optimized for MLB data."""
-        logger.info(f"🔍 Selecting top {n_features} features using {method} method...")
+    def select_features_pitcher_aware(self, X: pd.DataFrame, y: pd.Series, 
+                                     method: str = 'importance', 
+                                     n_features: int = 60) -> pd.DataFrame:
+        """Advanced feature selection optimized for pitcher-aware MLB data."""
+        logger.info(f"🔍⚾ Selecting top {n_features} features using {method} method (pitcher-aware)...")
         
         if len(X.columns) <= n_features:
             logger.info(f"   Already have {len(X.columns)} features (less than {n_features})")
             return X
         
         if method == 'importance':
-            # Use XGBoost feature importance (better for baseball)
+            # Use XGBoost with pitcher-optimized parameters
             model = xgb.XGBClassifier(
-                n_estimators=100, 
+                n_estimators=200,
+                max_depth=8,
+                learning_rate=0.1,
                 random_state=self.random_state,
                 eval_metric='logloss',
                 use_label_encoder=False
@@ -444,7 +660,25 @@ class IntegratedMLBEnhancedTrainer:
                 'importance': model.feature_importances_
             }).sort_values('importance', ascending=False)
             
+            # Ensure we keep key pitcher features if available
+            pitcher_features = [col for col in X.columns if any(keyword in col.lower() for keyword in 
+                                                              ['starter', 'era', 'whip', 'pitcher', 'k9', 'bb9', 'quality'])]
+            
             selected_features = importance_df.head(n_features)['feature'].tolist()
+            
+            # Force include top pitcher features if not in selection
+            pitcher_in_selection = len([f for f in selected_features if f in pitcher_features])
+            total_pitcher_features = len(pitcher_features)
+            
+            logger.info(f"   ⚾ Total pitcher features available: {total_pitcher_features}")
+            logger.info(f"   ⚾ Pitcher features in selection: {pitcher_in_selection}")
+            
+            if total_pitcher_features > 0:
+                # Show top pitcher features
+                top_pitcher_features = importance_df[importance_df['feature'].isin(pitcher_features)].head(5)
+                logger.info(f"   🔝 Top 5 pitcher features by importance:")
+                for i, (_, row) in enumerate(top_pitcher_features.iterrows()):
+                    logger.info(f"      {i+1}. {row['feature']}: {row['importance']:.3f}")
             
         elif method == 'kbest':
             selector = SelectKBest(score_func=f_classif, k=n_features)
@@ -459,32 +693,27 @@ class IntegratedMLBEnhancedTrainer:
             selected_features = X.columns[selector.support_].tolist()
             self.feature_selector = selector
         
-        logger.info(f"   ✅ Selected {len(selected_features)} features")
-        
-        # Show top features
-        logger.info(f"   📊 Top 10 selected features:")
-        for i, feat in enumerate(selected_features[:10]):
-            logger.info(f"      {i+1}. {feat}")
+        logger.info(f"   ✅ Selected {len(selected_features)} features for pitcher-aware training")
         
         return X[selected_features]
     
-    def train_single_model_mlb(self, model_name: str, X_train: pd.DataFrame, 
-                              y_train: pd.Series, X_test: pd.DataFrame, 
-                              y_test: pd.Series, tune_hyperparameters: bool = False) -> Dict:
-        """Train a single model optimized for MLB prediction."""
-        logger.info(f"🎯 Training {model_name} for MLB...")
+    def train_single_model_pitcher_aware(self, model_name: str, X_train: pd.DataFrame, 
+                                        y_train: pd.Series, X_test: pd.DataFrame, 
+                                        y_test: pd.Series, tune_hyperparameters: bool = False) -> Dict:
+        """Train a single model optimized for pitcher-aware MLB prediction."""
+        logger.info(f"🎯⚾ Training {model_name} with pitcher-aware features...")
         
         config = self.model_configs[model_name]
         
         if tune_hyperparameters and 'param_grid' in config:
-            logger.info("   🔧 Tuning hyperparameters...")
+            logger.info("   🔧 Tuning hyperparameters for pitcher-aware data...")
             model = config['model_class']()
             
-            # Use RandomizedSearchCV for faster tuning on large dataset
+            # Enhanced search for pitcher data
             search = RandomizedSearchCV(
                 model,
                 config['param_grid'],
-                n_iter=15,  # Balanced speed vs thoroughness
+                n_iter=20,  # More iterations for pitcher data
                 cv=5,
                 scoring='roc_auc',
                 n_jobs=-1,
@@ -494,7 +723,7 @@ class IntegratedMLBEnhancedTrainer:
             best_model = search.best_estimator_
             logger.info(f"   Best params: {search.best_params_}")
         else:
-            # Use optimized quick parameters
+            # Use pitcher-optimized quick parameters
             best_model = config['model_class'](**config['quick_params'])
             best_model.fit(X_train, y_train)
         
@@ -502,17 +731,18 @@ class IntegratedMLBEnhancedTrainer:
         y_pred = best_model.predict(X_test)
         y_pred_proba = best_model.predict_proba(X_test)[:, 1]
         
-        # Calculate comprehensive metrics
+        # Enhanced metrics calculation
         metrics = {
             'accuracy': accuracy_score(y_test, y_pred),
             'roc_auc': roc_auc_score(y_test, y_pred_proba),
             'predictions_std': np.std(y_pred_proba),
             'predictions_mean': np.mean(y_pred_proba),
             'near_fifty_pct': np.mean((y_pred_proba > 0.45) & (y_pred_proba < 0.55)),
-            'confident_predictions': np.mean((y_pred_proba < 0.4) | (y_pred_proba > 0.6))
+            'confident_predictions': np.mean((y_pred_proba < 0.4) | (y_pred_proba > 0.6)),
+            'very_confident': np.mean((y_pred_proba < 0.3) | (y_pred_proba > 0.7))
         }
         
-        # Cross-validation for robustness
+        # Cross-validation
         try:
             cv_scores = cross_val_score(best_model, X_train, y_train, cv=5, scoring='roc_auc')
             metrics['cv_mean'] = np.mean(cv_scores)
@@ -521,18 +751,20 @@ class IntegratedMLBEnhancedTrainer:
             metrics['cv_mean'] = metrics['roc_auc']
             metrics['cv_std'] = 0.0
         
-        # Kelly criterion edge for betting
-        if metrics['accuracy'] > 0.524:  # Profitable threshold
+        # Enhanced Kelly criterion for pitcher-aware betting
+        if metrics['accuracy'] > 0.524:
             edge = metrics['accuracy'] - 0.5
-            kelly_fraction = (edge * 2) - 1  # Simplified Kelly
+            kelly_fraction = (edge * 2) - 1
             metrics['kelly_edge'] = edge
             metrics['kelly_fraction'] = kelly_fraction
         
+        # Display results with pitcher context
         logger.info(f"   ✅ {model_name} Results:")
         logger.info(f"      Accuracy: {metrics['accuracy']:.3f}")
         logger.info(f"      ROC-AUC: {metrics['roc_auc']:.3f}")
         logger.info(f"      CV Score: {metrics['cv_mean']:.3f} (+/- {metrics['cv_std']:.3f})")
         logger.info(f"      Confident predictions: {metrics['confident_predictions']:.1%}")
+        logger.info(f"      Very confident: {metrics['very_confident']:.1%}")
         
         if metrics.get('kelly_edge'):
             logger.info(f"      💰 Kelly Edge: {metrics['kelly_edge']:.1%}")
@@ -546,22 +778,22 @@ class IntegratedMLBEnhancedTrainer:
             'name': model_name
         }
     
-    def train_all_models_integrated(self, feature_selection: bool = True,
-                                   tune_hyperparameters: bool = False,
-                                   n_features: int = 50) -> Dict:
-        """Train all models using your integrated MLB data."""
-        logger.info("🚀 INTEGRATED MLB ENHANCED TRAINING PIPELINE")
-        logger.info("=" * 60)
+    def train_all_models_pitcher_integrated(self, feature_selection: bool = True,
+                                           tune_hyperparameters: bool = False,
+                                           n_features: int = 60) -> Dict:
+        """Train all models using pitcher-integrated MLB data."""
+        logger.info("🚀⚾ PITCHER-INTEGRATED MLB ENHANCED TRAINING PIPELINE")
+        logger.info("=" * 70)
         
-        # Load data from your working database
-        data, y = self.load_mlb_data_from_database()
+        # Load data with pitcher integration
+        data, y = self.load_mlb_data_with_pitchers()
         
-        # Engineer advanced features
-        X = self.engineer_advanced_features(data)
+        # Engineer pitcher-aware features
+        X = self.engineer_pitcher_aware_features(data)
         
-        # Feature selection
+        # Pitcher-aware feature selection
         if feature_selection:
-            X = self.select_features_advanced(X, y, method='importance', n_features=n_features)
+            X = self.select_features_pitcher_aware(X, y, method='importance', n_features=n_features)
         
         self.feature_names = X.columns.tolist()
         
@@ -584,22 +816,38 @@ class IntegratedMLBEnhancedTrainer:
         X_test_scaled = self.scaler.transform(X_test)
         
         # Convert back to DataFrame
-        X_train_scaled = pd.DataFrame(X_train_scaled, columns=X.columns)
-        X_test_scaled = pd.DataFrame(X_test_scaled, columns=X.columns)
+        X_train_scaled = pd.DataFrame(X_train_scaled, columns=X.columns, index=X_train.index)
+        X_test_scaled = pd.DataFrame(X_test_scaled, columns=X.columns, index=X_test.index)
         
-        logger.info(f"📊 Training Configuration:")
+        # Count pitcher features
+        pitcher_feature_count = len([col for col in X.columns if any(keyword in col.lower() for keyword in 
+                                                                    ['starter', 'era', 'whip', 'pitcher', 'k9', 'bb9', 'quality'])])
+        
+        logger.info(f"📊 Enhanced Training Configuration:")
         logger.info(f"   Total games: {len(X)}")
         logger.info(f"   Train set: {len(X_train)} samples")
         logger.info(f"   Test set: {len(X_test)} samples")
-        logger.info(f"   Features: {len(X.columns)}")
+        logger.info(f"   Total features: {len(X.columns)}")
+        logger.info(f"   Pitcher features: {pitcher_feature_count}")
         logger.info(f"   Home win rate: {y_train.mean():.1%}")
         
-        # Train all models
+        if pitcher_feature_count > 10:
+            logger.info("   ⚾ EXCELLENT PITCHER INTEGRATION!")
+        elif pitcher_feature_count > 5:
+            logger.info("   ⚾ Good pitcher integration")
+        else:
+            logger.warning("   ⚠️ Limited pitcher integration")
+            logger.info("   💡 To improve predictions, add pitcher data to your database:")
+            logger.info("      1. Populate player_statistics table with pitcher stats")
+            logger.info("      2. Add starting pitcher assignments to game_starting_pitchers table")
+            logger.info("      3. Consider integrating with MLB API for live pitcher data")
+        
+        # Train enhanced models
         results = {}
         
         for model_name in self.model_configs.keys():
             try:
-                result = self.train_single_model_mlb(
+                result = self.train_single_model_pitcher_aware(
                     model_name, X_train_scaled, y_train, 
                     X_test_scaled, y_test, tune_hyperparameters
                 )
@@ -616,10 +864,17 @@ class IntegratedMLBEnhancedTrainer:
             self.best_model = results[best_model_name]['model']
             self.best_model_name = best_model_name
         
-        # Display results
-        logger.info("=" * 60)
-        logger.info("📊 MLB MODEL COMPARISON RESULTS")
-        logger.info("=" * 60)
+        # Enhanced results display
+        self._display_pitcher_integration_results(results, pitcher_feature_count)
+        
+        self.training_results = results
+        return results
+    
+    def _display_pitcher_integration_results(self, results: Dict, pitcher_features: int):
+        """Display results with pitcher integration insights."""
+        logger.info("=" * 70)
+        logger.info("📊⚾ PITCHER-INTEGRATED MLB MODEL RESULTS")
+        logger.info("=" * 70)
         
         if results:
             comparison_df = pd.DataFrame({
@@ -634,95 +889,165 @@ class IntegratedMLBEnhancedTrainer:
             logger.info(f"   ROC-AUC: {best_metrics['roc_auc']:.3f}")
             logger.info(f"   Accuracy: {best_metrics['accuracy']:.3f}")
             
+            # Enhanced insights for pitcher integration
+            if pitcher_features > 10:
+                logger.info(f"   ⚾ Pitcher features used: {pitcher_features}")
+                logger.info("   🎯 ENHANCED WITH COMPREHENSIVE PITCHER DATA!")
+                
+                if best_metrics['accuracy'] > 0.56:
+                    logger.info("   📈 EXCELLENT PERFORMANCE FROM PITCHER INTEGRATION!")
+                elif best_metrics['accuracy'] > 0.54:
+                    logger.info("   📈 GOOD IMPROVEMENT FROM PITCHER INTEGRATION!")
+                
             if best_metrics.get('kelly_edge'):
                 logger.info(f"   💰 Profitable Edge: {best_metrics['kelly_edge']:.1%}")
-                logger.info("   🎯 READY FOR PROFITABLE BETTING!")
-        
-        self.training_results = results
-        return results
+                logger.info("   🎯 READY FOR PROFITABLE PITCHER-AWARE BETTING!")
+            
+            # Feature importance if available
+            if hasattr(self.best_model, 'feature_importances_'):
+                self._show_top_pitcher_features()
     
-    def save_integrated_model(self):
-        """Save the integrated model and all components."""
+    def _show_top_pitcher_features(self, top_n: int = 15):
+        """Show top features from the best model with pitcher emphasis."""
+        if hasattr(self.best_model, 'feature_importances_') and self.feature_names:
+            importance_df = pd.DataFrame({
+                'feature': self.feature_names,
+                'importance': self.best_model.feature_importances_
+            }).sort_values('importance', ascending=False)
+            
+            logger.info(f"\n🔍 TOP {top_n} MOST IMPORTANT FEATURES:")
+            for i, (_, row) in enumerate(importance_df.head(top_n).iterrows()):
+                feature_name = row['feature']
+                importance = row['importance']
+                
+                # Add emoji for different feature types
+                if any(keyword in feature_name.lower() for keyword in ['starter', 'era', 'whip', 'pitcher', 'k9', 'bb9', 'quality']):
+                    emoji = "⚾"
+                elif 'team' in feature_name.lower():
+                    emoji = "🏟️"
+                elif any(keyword in feature_name.lower() for keyword in ['date', 'time', 'season', 'month']):
+                    emoji = "📅"
+                else:
+                    emoji = "📊"
+                
+                logger.info(f"   {i+1:2}. {emoji} {feature_name}: {importance:.3f}")
+    
+    def save_pitcher_integrated_model(self):
+        """Save the pitcher-integrated model and all components."""
         if self.best_model is None:
             raise ValueError("No model trained yet!")
         
         # Save best model
-        model_path = self.model_dir / f"{self.best_model_name}_model.pkl"
+        model_path = self.model_dir / f"{self.best_model_name}_pitcher_model.pkl"
         with open(model_path, 'wb') as f:
             pickle.dump(self.best_model, f)
         
         # Save scaler
-        scaler_path = self.model_dir / "scaler.pkl"
+        scaler_path = self.model_dir / "pitcher_scaler.pkl"
         with open(scaler_path, 'wb') as f:
             pickle.dump(self.scaler, f)
         
         # Save label encoders
-        encoders_path = self.model_dir / "label_encoders.pkl"
+        encoders_path = self.model_dir / "pitcher_label_encoders.pkl"
         with open(encoders_path, 'wb') as f:
             pickle.dump(self.label_encoders, f)
         
         # Save feature names
-        features_path = self.model_dir / "feature_names.pkl"
+        features_path = self.model_dir / "pitcher_feature_names.pkl"
         with open(features_path, 'wb') as f:
             pickle.dump(self.feature_names, f)
         
+        # Count pitcher features
+        pitcher_feature_count = len([col for col in self.feature_names if any(keyword in col.lower() for keyword in 
+                                                                             ['starter', 'era', 'whip', 'pitcher', 'k9', 'bb9', 'quality'])])
+        
         # Save comprehensive metadata
         best_metrics = self.training_results[self.best_model_name]['metrics']
+        
+        # Convert numpy types to Python types for JSON serialization
+        def convert_numpy_types(obj):
+            """Convert numpy types to Python types for JSON serialization."""
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_types(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            else:
+                return obj
+        
+        # Clean metrics for JSON
+        clean_metrics = convert_numpy_types(best_metrics)
+        
         metadata = {
             'model_type': self.best_model_name,
             'n_features': len(self.feature_names),
+            'pitcher_features': pitcher_feature_count,
+            'pitcher_integration': pitcher_feature_count > 5,
             'training_date': datetime.now().isoformat(),
             'feature_names': self.feature_names,
-            'performance_metrics': best_metrics,
-            'is_profitable': best_metrics.get('kelly_edge', 0) > 0,
-            'recommended_kelly_fraction': best_metrics.get('kelly_fraction', 0),
-            'training_games': best_metrics.get('training_samples', 0)
+            'performance_metrics': clean_metrics,
+            'is_profitable': clean_metrics.get('kelly_edge', 0) > 0,
+            'recommended_kelly_fraction': clean_metrics.get('kelly_fraction', 0),
+            'training_games': len(self.training_results),
+            'model_version': 'pitcher_integrated_v1.0'
         }
         
-        metadata_path = self.model_dir / "model_metadata.json"
+        metadata_path = self.model_dir / "pitcher_model_metadata.json"
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        logger.info(f"💾 Integrated model saved to {self.model_dir}")
+        logger.info(f"💾⚾ Pitcher-integrated model saved to {self.model_dir}")
         logger.info(f"   Model: {self.best_model_name}")
-        logger.info(f"   Features: {len(self.feature_names)}")
+        logger.info(f"   Total features: {len(self.feature_names)}")
+        logger.info(f"   Pitcher features: {pitcher_feature_count}")
         logger.info(f"   Performance: {best_metrics['accuracy']:.1%} accuracy")
         
         if metadata['is_profitable']:
             logger.info(f"   💰 PROFITABLE: {best_metrics['kelly_edge']:.1%} edge")
+        
+        if pitcher_feature_count > 10:
+            logger.info("   🎯⚾ PITCHER INTEGRATION SUCCESSFUL!")
 
 
-# Production integration function
-def run_integrated_mlb_training():
-    """Run the complete integrated MLB training pipeline."""
-    logger.info("🚀 Starting Integrated MLB Enhanced Training")
+# Enhanced production function
+def run_pitcher_integrated_mlb_training():
+    """Run the complete pitcher-integrated MLB training pipeline."""
+    logger.info("🚀⚾ Starting Pitcher-Integrated MLB Enhanced Training")
     
     try:
-        # Initialize trainer
+        # Initialize enhanced trainer
         trainer = IntegratedMLBEnhancedTrainer()
         
-        # Train all models
-        results = trainer.train_all_models_integrated(
+        # Train all models with pitcher integration
+        results = trainer.train_all_models_pitcher_integrated(
             feature_selection=True,
             tune_hyperparameters=False,  # Set to True for production
-            n_features=50
+            n_features=60  # More features for pitcher data
         )
         
         if results:
             # Save best model
-            trainer.save_integrated_model()
+            trainer.save_pitcher_integrated_model()
             
-            # Summary
+            # Enhanced summary
             best_metrics = results[trainer.best_model_name]['metrics']
+            pitcher_feature_count = len([col for col in trainer.feature_names if any(keyword in col.lower() for keyword in 
+                                                                                   ['starter', 'era', 'whip', 'pitcher', 'k9', 'bb9', 'quality'])])
             
-            logger.info("✅ INTEGRATED TRAINING COMPLETE!")
+            logger.info("✅ PITCHER-INTEGRATED TRAINING COMPLETE!")
             logger.info(f"🏆 Best Model: {trainer.best_model_name}")
             logger.info(f"📊 Accuracy: {best_metrics['accuracy']:.1%}")
             logger.info(f"🎯 ROC-AUC: {best_metrics['roc_auc']:.3f}")
+            logger.info(f"⚾ Pitcher Features: {pitcher_feature_count}")
             
             if best_metrics.get('kelly_edge'):
                 logger.info(f"💰 Profitable Edge: {best_metrics['kelly_edge']:.1%}")
-                logger.info("🎯 READY FOR LIVE BETTING!")
+                logger.info("🎯⚾ READY FOR PITCHER-AWARE BETTING!")
             
             return trainer, results
         else:
@@ -730,16 +1055,16 @@ def run_integrated_mlb_training():
             return None, None
             
     except Exception as e:
-        logger.error(f"❌ Integrated training failed: {e}")
+        logger.error(f"❌ Pitcher-integrated training failed: {e}")
         import traceback
         traceback.print_exc()
         return None, None
 
 if __name__ == "__main__":
-    trainer, results = run_integrated_mlb_training()
+    trainer, results = run_pitcher_integrated_mlb_training()
     
     if trainer and results:
-        print("🎉 INTEGRATED MLB ENHANCED TRAINING SUCCESSFUL!")
-        print("💰 Ready for profitable MLB predictions!")
+        print("🎉⚾ PITCHER-INTEGRATED MLB TRAINING SUCCESSFUL!")
+        print("💰 Ready for enhanced MLB predictions with pitcher data!")
     else:
         print("❌ Training failed - check logs")
