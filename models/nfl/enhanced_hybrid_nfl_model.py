@@ -1524,7 +1524,7 @@ def main():
         subprocess.check_call(['pip', 'install', 'nfl_data_py'])
         print("✅ nfl_data_py installed!")
         return
-    
+     
     model = EnhancedHybridNFLModel(local_tz=args.timezone)
     
     if args.train:
