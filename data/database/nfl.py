@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from loguru import logger
 import json
+from contextlib import contextmanager
 
 from config.settings import Settings
 
@@ -20,6 +21,34 @@ class NFLDatabase:
         # Initialize database tables
         self._create_tables()
         logger.info(f"🏈 NFL Database initialized: {self.db_path}")
+    
+    def get_connection(self):
+        """
+        Get database connection for external use.
+        Returns a SQLite connection object.
+        
+        Usage:
+            conn = db.get_connection()
+            # ... use connection ...
+            conn.close()
+        """
+        return sqlite3.connect(self.db_path)
+    
+    @contextmanager
+    def get_connection_context(self):
+        """
+        Get database connection as context manager.
+        Automatically handles closing the connection.
+        
+        Usage:
+            with db.get_connection_context() as conn:
+                # ... use connection ...
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
     
     def _create_tables(self):
         """Create all necessary tables for NFL data."""
