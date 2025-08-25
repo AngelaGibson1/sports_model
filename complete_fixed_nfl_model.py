@@ -351,55 +351,68 @@ class CompleteFixedNFLModel:
 
     def _load_weekly_player_stats(self, seasons: List[int]) -> pd.DataFrame:
         """
-        Load per-player, per-game weekly stats from nfl_data_py for the given seasons,
-        with robust column handling and safe fallbacks.
+        Load per-player, per-game weekly stats from nfl_data_py for the given seasons.
+        - Fetch one season at a time so a missing season (e.g., current year) won't kill the whole load.
+        - Always return expected columns so downstream code never KeyErrors on 'season', etc.
         """
-        logger.info(f"📅 Loading weekly player stats for seasons: {seasons}")
+        logger.info(f"📅 Loading weekly player stats (per-season) for: {seasons}")
+        expected_cols = [
+            'player_display_name','recent_team','opponent_team','week','season','player_id',
+            'passing_yards','rushing_yards','receiving_yards','team_id','opp_team_id'
+        ]
         if not NFL_DATA_PY_AVAILABLE:
-            logger.warning("⚠️ nfl_data_py unavailable for weekly stats. Returning empty.")
-            return pd.DataFrame()
+            logger.warning("⚠️ nfl_data_py unavailable for weekly stats. Returning empty with headers.")
+            return pd.DataFrame(columns=expected_cols)
 
-        try:
-            weekly = nfl.import_weekly_data(seasons)
-            logger.info(f"   ✅ Raw weekly rows: {len(weekly)}")
+        frames, failed = [], []
+        for s in sorted(set(seasons)):
+            try:
+                df = nfl.import_weekly_data([s])
+                logger.info(f"   ✅ Season {s}: {len(df)} weekly rows")
 
-            # Normalize expected columns with flexible lookup
-            # Common cols in nfl_data_py weekly: 'player_display_name', 'recent_team', 'opponent_team', 'week', 'season', 
-            # 'passing_yards','rushing_yards','receiving_yards','attempts','carries','targets','receptions'
-            rename_map = {}
-            if 'player' in weekly.columns and 'player_display_name' not in weekly.columns:
-                rename_map['player'] = 'player_display_name'
-            if rename_map:
-                weekly = weekly.rename(columns=rename_map)
+                # Normalize a few columns
+                if 'player' in df.columns and 'player_display_name' not in df.columns:
+                    df = df.rename(columns={'player':'player_display_name'})
+                for col in ['player_display_name','recent_team','opponent_team','week','season']:
+                    if col not in df.columns:
+                        df[col] = np.nan
 
-            # Ensure essentials
-            for col in ['player_display_name', 'recent_team', 'opponent_team', 'week', 'season']:
-                if col not in weekly.columns:
-                    weekly[col] = np.nan
+                # Team IDs
+                df['team_id'] = df['recent_team'].map(NFL_DATA_PY_TEAM_MAP).fillna(1).astype(int)
+                df['opp_team_id'] = df['opponent_team'].map(NFL_DATA_PY_TEAM_MAP).fillna(1).astype(int)
 
-            # Standardize team IDs
-            weekly['team_id'] = weekly['recent_team'].map(NFL_DATA_PY_TEAM_MAP).fillna(1).astype(int)
-            weekly['opp_team_id'] = weekly['opponent_team'].map(NFL_DATA_PY_TEAM_MAP).fillna(1).astype(int)
+                # Targets numeric
+                for tgt in ['passing_yards','rushing_yards','receiving_yards']:
+                    if tgt not in df.columns:
+                        df[tgt] = 0.0
+                    df[tgt] = pd.to_numeric(df[tgt], errors='coerce').fillna(0.0)
 
-            # Numeric targets (fill missing with 0 for training convenience)
-            for tgt in ['passing_yards', 'rushing_yards', 'receiving_yards']:
-                if tgt not in weekly.columns:
-                    weekly[tgt] = 0.0
-                weekly[tgt] = pd.to_numeric(weekly[tgt], errors='coerce').fillna(0.0)
+                # Player ID
+                if 'player_id' not in df.columns:
+                    df['player_id'] = (df['player_display_name'].astype(str) + "|" +
+                                       df['recent_team'].astype(str)).apply(lambda s: abs(hash(s)) % (10**9))
 
-            # Add simple ID for players (stable across seasons)
-            if 'player_id' not in weekly.columns:
-                # Best-effort deterministic hash
-                weekly['player_id'] = (weekly['player_display_name'].astype(str) + "|" +
-                                       weekly['recent_team'].astype(str)).apply(lambda s: abs(hash(s)) % (10**9))
+                frames.append(df)
+            except Exception as e:
+                failed.append((s, str(e)))
+                logger.warning(f"   ⚠️ Season {s} weekly not available: {e}")
 
-            # Sort for rolling calcs
-            weekly = weekly.sort_values(['player_id', 'season', 'week']).reset_index(drop=True)
-            return weekly
+        if not frames:
+            logger.error("❌ No weekly datasets retrievable; returning empty with headers")
+            return pd.DataFrame(columns=expected_cols)
 
-        except Exception as e:
-            logger.error(f"❌ Failed to load weekly data: {e}")
-            return pd.DataFrame()
+        weekly = pd.concat(frames, ignore_index=True, sort=False)
+
+        # Ensure expected columns exist
+        for c in expected_cols:
+            if c not in weekly.columns:
+                weekly[c] = np.nan
+
+        weekly = weekly.sort_values(['player_id','season','week']).reset_index(drop=True)
+        if failed:
+            miss = ", ".join(str(s) for s, _ in failed)
+            logger.info(f"ℹ️ Skipped seasons with no weekly data: {miss}")
+        return weekly
 
     def _add_player_rolling_features(self, weekly: pd.DataFrame, windows=(3, 5)) -> pd.DataFrame:
         """
@@ -533,38 +546,47 @@ class CompleteFixedNFLModel:
 
     def _pick_game_candidates(self, week_df: pd.DataFrame, game_row: pd.Series, per_game_top: int = 7) -> pd.DataFrame:
         """
-        Heuristic: include both teams' QB1, RB1, WR1, TE1 (8 players), then trim to top 7
-        by projected yards later. If positions aren't labeled, use rolling yard leaders.
+        Prefer same-season/week slice. If empty (e.g., Week 1 before weekly data is published),
+        fall back to each player's most recent appearance across prior seasons for both teams.
         """
+        home_id, away_id = game_row['home_team_id'], game_row['away_team_id']
+
+        # Try strict same-season/week context first
         gmask = (
             (week_df['season'] == game_row['season']) &
-            (week_df['week'] == game_row['week']) &
-            ( (week_df['team_id'] == game_row['home_team_id']) | (week_df['team_id'] == game_row['away_team_id']) )
+            (week_df['week'] < game_row['week']) &
+            (week_df['team_id'].isin([home_id, away_id]))
         )
         candidates = week_df[gmask].copy()
 
+        # Fallback: last known row per player for both teams (any season)
         if candidates.empty:
-            return candidates
+            pool = week_df[week_df['team_id'].isin([home_id, away_id])].copy()
+            if pool.empty:
+                return pool
+            pool = pool.sort_values(['player_id','season','week'])
+            candidates = pool.groupby('player_id', as_index=False).tail(1)
 
-        # Proxies: last-3 avg to infer role
+        # Ensure rolling proxies exist
         for col in ['passing_yards_r3','rushing_yards_r3','receiving_yards_r3']:
             if col not in candidates.columns:
                 candidates[col] = 0.0
 
-        # QB1 = highest pass_yards_r3 per team; RB1 = highest rush_yards_r3; WR1/TE1 = highest recv_yards_r3
         picks = []
-        for tid in [game_row['home_team_id'], game_row['away_team_id']]:
+        for tid in [home_id, away_id]:
             tdf = candidates[candidates['team_id'] == tid]
             if tdf.empty:
                 continue
             qb = tdf.sort_values('passing_yards_r3', ascending=False).head(1)
             rb = tdf.sort_values('rushing_yards_r3', ascending=False).head(1)
-            wr = tdf.sort_values('receiving_yards_r3', ascending=False).head(1)
-            te = tdf.sort_values('receiving_yards_r3', ascending=False).iloc[1:2]  # second-best receiver as TE proxy
-            picks.append(qb); picks.append(rb); picks.append(wr); picks.append(te)
+            wr1 = tdf.sort_values('receiving_yards_r3', ascending=False).head(1)
+            wr2 = tdf.sort_values('receiving_yards_r3', ascending=False).iloc[1:2]
+            picks.extend([qb, rb, wr1, wr2])
 
-        picks_df = pd.concat([p for p in picks if p is not None and not p.empty], ignore_index=True)
-        return picks_df.drop_duplicates(subset=['player_id']) if not picks_df.empty else candidates.head(per_game_top)
+        picks_df = pd.concat([p for p in picks if p is not None and not p.empty], ignore_index=True) \
+                      .drop_duplicates(subset=['player_id'])
+        # over-pick then trim upstream, but also guard here:
+        return picks_df.head(max(per_game_top + 4, per_game_top))
 
     def _predict_props_for_players(self, players_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -603,7 +625,14 @@ class CompleteFixedNFLModel:
 
         # Load weekly history up to the given week (for rolling features)
         history = self._load_weekly_player_stats([season-3, season-2, season-1, season])
-        history = history[ (history['season'] < season) | ((history['season'] == season) & (history['week'] < week)) ].copy()
+
+        # If the current season's weekly data isn't published yet, fall back to previous seasons only
+        if history.empty or (season in history['season'].unique()) is False:
+            logger.warning(f"ℹ️ No weekly data for {season} yet; using prior seasons only.")
+            history = self._load_weekly_player_stats([season-3, season-2, season-1])
+
+        # Safe filter (history always has 'season' now)
+        history = history[(history['season'] < season) | ((history['season'] == season) & (history['week'] < week))].copy()
         feats_hist = self._add_player_rolling_features(history)
 
         # Build schedules/games
